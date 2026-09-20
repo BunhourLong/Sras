@@ -1,0 +1,21 @@
+# Project instructions (local only)
+CLAUDE.md
+
+# Runtime data dir (Bitcask data files)
+data/
+
+# Binaries
+/server
+*.exe
+*.test
+*.out
+
+# Go tooling
+coverage.out
+vendor/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
