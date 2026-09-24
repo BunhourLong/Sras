@@ -19,3 +19,6 @@ vendor/
 .idea/
 .vscode/
 *.swp
+
+# Local agent session notes
+memory.md

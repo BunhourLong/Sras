@@ -28,10 +28,15 @@ func datafilePath(dir string, id uint32) string {
 	return filepath.Join(dir, fmt.Sprintf(datafileFormat, id))
 }
 
-// openDatafile opens an existing data file read-only.
-func openDatafile(dir string, id uint32) (*datafile, error) {
+// openDatafile opens an existing data file, read-only unless it is the
+// active file.
+func openDatafile(dir string, id uint32, readOnly bool) (*datafile, error) {
 	path := datafilePath(dir, id)
-	f, err := os.Open(path)
+	flag := os.O_RDONLY
+	if !readOnly {
+		flag = os.O_RDWR
+	}
+	f, err := os.OpenFile(path, flag, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open data file: %w", err)
 	}
@@ -40,7 +45,7 @@ func openDatafile(dir string, id uint32) (*datafile, error) {
 		f.Close()
 		return nil, fmt.Errorf("stat data file %s: %w", path, err)
 	}
-	return &datafile{id: id, path: path, f: f, readOnly: true, size: info.Size()}, nil
+	return &datafile{id: id, path: path, f: f, readOnly: readOnly, size: info.Size()}, nil
 }
 
 // createDatafile creates a new, empty active data file. It fails if the file
