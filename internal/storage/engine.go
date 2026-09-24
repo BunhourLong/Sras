@@ -23,6 +23,7 @@ var (
 	ErrNotFound       = errors.New("storage: key not found")
 	ErrCorrupt        = errors.New("storage: corrupt record")
 	ErrClosed         = errors.New("storage: engine is closed")
+	ErrLocked         = errors.New("storage: data dir is locked by another engine")
 	ErrNotImplemented = errors.New("storage: not implemented")
 )
 
