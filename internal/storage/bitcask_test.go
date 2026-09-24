@@ -241,3 +241,66 @@ func TestBitcaskConcurrentRotation(t *testing.T) {
 		t.Fatalf("%d data files, want many rotations", len(b.files))
 	}
 }
+
+func TestBitcaskDelete(t *testing.T) {
+	dir := t.TempDir()
+	b := openTest(t, dir, FsyncNever)
+
+	if err := b.Delete([]byte("missing")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete missing: err %v, want ErrNotFound", err)
+	}
+	if b.active != nil {
+		t.Fatal("delete of a missing key wrote a record")
+	}
+
+	putAll(t, b, "gone", "1", "back", "old", "kept", "k")
+	for _, k := range []string{"gone", "back"} {
+		if err := b.Delete([]byte(k)); err != nil {
+			t.Fatal(err)
+		}
+		wantGet(t, b, k, nil)
+	}
+	if err := b.Delete([]byte("gone")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete twice: err %v, want ErrNotFound", err)
+	}
+	putAll(t, b, "back", "new")
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Delete([]byte("kept")); !errors.Is(err, ErrClosed) {
+		t.Fatalf("delete after close: err %v, want ErrClosed", err)
+	}
+
+	// Tombstones survive a restart; a Put after a Delete wins.
+	b = openTest(t, dir, FsyncNever)
+	wantGet(t, b, "gone", nil)
+	wantGet(t, b, "back", []byte("new"))
+	wantGet(t, b, "kept", []byte("k"))
+	if n := b.keydir.len(); n != 2 {
+		t.Fatalf("keydir has %d keys, want 2", n)
+	}
+}
+
+// A tombstone that lands in a newer file than the value still hides it after
+// a restart.
+func TestBitcaskDeleteAcrossRotation(t *testing.T) {
+	dir := t.TempDir()
+	b, err := Open(Options{Dir: dir, Fsync: FsyncNever, MaxFileSize: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	putAll(t, b, "a", "value in file 1")
+	putAll(t, b, "filler", "pushes the tombstone into a newer file")
+	if err := b.Delete([]byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	if b.active.id == 1 {
+		t.Fatal("tombstone is in file 1, want a newer file")
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b = openTest(t, dir, FsyncNever)
+	wantGet(t, b, "a", nil)
+}

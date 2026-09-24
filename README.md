@@ -6,7 +6,7 @@ Clients store JSON documents in named collections through a small REST API. Unde
 
 This is a learning project: **correctness and clarity come before performance**. It uses only the Go standard library.
 
-> **Status:** work in progress. Documents can be created, replaced and read over HTTP, and survive a restart (the keydir is rebuilt on startup). Data files rotate at `MaxFileSize`. Delete, scan, query and compaction are still pending. See [Roadmap](#roadmap).
+> **Status:** work in progress. Documents can be created, replaced and read over HTTP, and survive a restart (the keydir is rebuilt on startup). Data files rotate at `MaxFileSize`. The engine supports delete (tombstones); the `DELETE` endpoint, scan, query and compaction are still pending. See [Roadmap](#roadmap).
 
 ---
 
@@ -199,7 +199,7 @@ Every live key has exactly one entry pointing at its latest value. The whole key
 |---|---|---|
 | **Put** | Encode record, append to the active file, update the keydir. Keydir stores `recordStart + 20 + len(key)` as the value offset. | One sequential write |
 | **Get** | Keydir lookup, then **one `ReadAt`** that covers the whole record (header + key + value). CRC and key are verified before returning. | One random read |
-| **Delete** *(planned)* | Append a tombstone, remove the key from the keydir | One sequential write |
+| **Delete** | Append a tombstone, remove the key from the keydir. A missing key returns `ErrNotFound` and writes nothing. Shares `Put`'s write path (`appendRecord`), so rotation and fsync apply. | One sequential write |
 | **Scan(prefix)** *(planned)* | Walk every keydir key and match the prefix | **O(n)** over all keys, because a hash index is unordered |
 | **Merge** *(planned)* | Rewrite immutable files, keeping only live records | Background I/O |
 
@@ -302,9 +302,9 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 |---|---|---|
 | 1 | Service layer + HTTP CRUD | 🟡 `GET`, `PUT`, `/healthz` done; `DELETE` pending |
 | 2 | `record.go` + `datafile.go` (encode/decode, CRC, append) | ✅ done |
-| 3 | Bitcask `Put` / `Get` / `Delete` on a single file | 🟡 `Get`, `Put`, fsync policies done; `Delete` pending |
+| 3 | Bitcask `Put` / `Get` / `Delete` on a single file | ✅ done |
 | 4 | File rotation + keydir rebuild on startup | ✅ done |
-| 5 | Tombstones + truncated-tail recovery | 🟡 truncated-tail recovery + tombstone replay done; `Delete` pending |
+| 5 | Tombstones + truncated-tail recovery | ✅ done |
 | 6 | Compaction (`Merge`) + `/admin/merge` | ⏳ |
 | 7 | Query engine + `_find` endpoint | ⏳ types only |
 | 8 | Optional: hint files, secondary indexes, TTL, auth | ⏳ |
@@ -315,7 +315,7 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 
 - **Startup time grows with data size:** recovery replays every record (hint files are planned).
 - **Data dir lock uses `flock`:** Unix only (macOS/Linux); no Windows build yet.
-- **No delete, scan, query, or compaction yet.**
+- **No `DELETE` endpoint, scan, query, or compaction yet.**
 - **Keys must fit in RAM:** a Bitcask trait by design. Every live key is held in the keydir.
 - **Scans are O(n):** the keydir is a hash map, so prefix scans (and `_find`) walk every key.
 - **One global write lock in the service layer:** simple and correct, but writes to different documents serialize.

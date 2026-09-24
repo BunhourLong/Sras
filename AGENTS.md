@@ -96,7 +96,7 @@ map[string]entry   // guarded by sync.RWMutex
 ### Operations
 - **Put:** append record to the active file, update keydir, rotate if needed. The keydir stores the value offset: `recordStart + headerSize + len(key)`. The first Put into an empty dir creates `000001.data`; on `Open` the newest file is reopened read-write, older ones read-only.
 - **Get:** keydir lookup, then one `ReadAt` covering the whole record (under `fmu.RLock`, so `Close` waits), verify CRC and key.
-- **Delete:** append tombstone, remove key from keydir.
+- **Delete:** append tombstone, remove key from keydir. A missing key returns `ErrNotFound` and writes nothing. `Put` and `Delete` share `appendRecord` (closed check, lazy create, monotonic ts, rotation, fsync).
 - **Scan(prefix):** iterate keydir keys with the prefix. O(n) because the hash index is unordered. Document it, don't hide it.
 - **Concurrency:** single writer (`sync.Mutex` on writes), many concurrent readers. Lock order is `wmu` then `fmu`; `Close` takes `wmu` so it waits for an in-flight Put.
 - **Durability:** fsync policy `always` | `interval` | `never`, default `interval` (1s). `always` syncs inside Put; `interval` runs a background `syncLoop` that `Close` stops; `Close` always syncs the active file.
@@ -142,9 +142,9 @@ Build order (one step per task):
 
 1. In-memory `Engine` + HTTP CRUD + service layer — **partial**: `GET`/`PUT /db/{collection}/{id}` and `GET /healthz` wired; `DELETE` pending
 2. `record.go` + `datafile.go` (encode/decode, CRC) — **done** (`encodeRecord`, `createDatafile`, `append`, `sync`)
-3. Bitcask `Put/Get/Delete` with a single data file — **`Get`/`Put` done** (incl. fsync policies), `Delete` pending
+3. Bitcask `Put/Get/Delete` with a single data file — **done** (incl. fsync policies)
 4. File rotation + keydir rebuild in `recovery.go` — **done** (`rotate()` in `bitcask.go`; `datafile.records` scanner, `rebuildKeydir`)
-5. Tombstones + truncated-tail recovery — **recovery done** (replay honours tombstones; active-file bad tail is truncated + warned; bad immutable file → `ErrCorrupt`); `Delete` pending
+5. Tombstones + truncated-tail recovery — **done** (`Delete` writes tombstones; replay honours them; active-file bad tail is truncated + warned; bad immutable file → `ErrCorrupt`)
 
 Also done with recovery: monotonic Put timestamps (`lastTS`), `flock` on `<dir>/LOCK` (`ErrLocked`, Unix only), `Get` holds `fmu.RLock` across `ReadAt`.
 6. Compaction (`Merge`) — pending
@@ -178,6 +178,7 @@ go test -race ./...
 Run `gofmt`, `go vet`, and `go test -race ./...` before finishing any task.
 
 ## Working rules for agents
+- **Always use the `ponytail` skill** (full level): load it at the start of every task and re-read it at least every 1–2 prompts so it doesn't drift. Its ladder applies to all code: reuse what exists, stdlib first, shortest correct diff, `ponytail:` comments on deliberate corners.
 - **Minimal diffs.** Change only what the task needs. No drive-by refactors, renames, or reformatting.
 - Before a non-trivial change, state the plan in a few lines, then implement.
 - Do not add dependencies without asking.

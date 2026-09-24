@@ -227,17 +227,29 @@ func (b *Bitcask) Put(key, value []byte) error {
 	b.wmu.Lock()
 	defer b.wmu.Unlock()
 
+	e, err := b.appendRecord(key, value, false)
+	if err != nil {
+		return fmt.Errorf("storage: put %q: %w", key, err)
+	}
+	b.keydir.put(string(key), e)
+	return nil
+}
+
+// appendRecord writes one record (a value, or a tombstone) to the active file,
+// rotating first if needed, and returns the keydir entry for it. The caller
+// holds wmu.
+func (b *Bitcask) appendRecord(key, value []byte, tombstone bool) (entry, error) {
 	// Close also takes wmu, so neither closed nor active can change under us.
 	b.fmu.RLock()
 	closed, active := b.closed, b.active
 	b.fmu.RUnlock()
 	if closed {
-		return ErrClosed
+		return entry{}, ErrClosed
 	}
 	if active == nil {
 		df, err := createDatafile(b.opts.Dir, b.nextID)
 		if err != nil {
-			return fmt.Errorf("storage: %w", err)
+			return entry{}, err
 		}
 		b.fmu.Lock()
 		b.files[df.id] = df
@@ -250,34 +262,32 @@ func (b *Bitcask) Put(key, value []byte) error {
 	// Monotonic: a clock that jumps backwards must not make this write lose
 	// to an older one on replay.
 	ts := max(time.Now().UnixNano(), b.lastTS+1)
-	buf, err := encodeRecord(ts, key, value, false)
+	buf, err := encodeRecord(ts, key, value, tombstone)
 	if err != nil {
-		return err
+		return entry{}, err
 	}
 	// size > 0: a record larger than MaxFileSize still gets a file of its own.
 	if active.size > 0 && active.size+int64(len(buf)) > b.opts.MaxFileSize {
 		if active, err = b.rotate(active); err != nil {
-			return fmt.Errorf("storage: put %q: %w", key, err)
+			return entry{}, err
 		}
 	}
 	off, err := active.append(buf)
 	if err != nil {
-		return fmt.Errorf("storage: put %q: %w", key, err)
+		return entry{}, err
 	}
 	b.lastTS = ts
 	if b.opts.Fsync == FsyncAlways {
 		if err := active.sync(); err != nil {
-			return fmt.Errorf("storage: put %q: %w", key, err)
+			return entry{}, err
 		}
 	}
-
-	b.keydir.put(string(key), entry{
+	return entry{
 		fileID:    active.id,
 		valueOff:  off + int64(headerSize) + int64(len(key)),
 		valueSize: uint32(len(value)),
 		timestamp: ts,
-	})
-	return nil
+	}, nil
 }
 
 // rotate makes old immutable and starts a new active file. The caller holds
@@ -310,11 +320,21 @@ func (b *Bitcask) rotate(old *datafile) (*datafile, error) {
 	return df, nil
 }
 
-// Delete appends a tombstone and drops the key from the keydir.
-//
-// TODO(build order 5): implement tombstones.
+// Delete appends a tombstone and drops the key from the keydir. Deleting a
+// missing key returns ErrNotFound and writes nothing.
 func (b *Bitcask) Delete(key []byte) error {
-	return ErrNotImplemented
+	b.wmu.Lock()
+	defer b.wmu.Unlock()
+
+	// Writers hold wmu, so the key can't appear between this check and the append.
+	if _, ok := b.keydir.get(string(key)); !ok {
+		return ErrNotFound
+	}
+	if _, err := b.appendRecord(key, nil, true); err != nil {
+		return fmt.Errorf("storage: delete %q: %w", key, err)
+	}
+	b.keydir.delete(string(key))
+	return nil
 }
 
 // Scan walks every keydir key with the given prefix. The hash index is
