@@ -50,6 +50,8 @@ func (s *Server) writeServiceError(w http.ResponseWriter, r *http.Request, err e
 		s.writeError(w, http.StatusBadRequest, codeBadRequest, "invalid collection name")
 	case errors.Is(err, service.ErrInvalidID):
 		s.writeError(w, http.StatusBadRequest, codeBadRequest, "invalid document id")
+	case errors.Is(err, service.ErrInvalidDocument):
+		s.writeError(w, http.StatusBadRequest, codeBadRequest, err.Error())
 	case errors.Is(err, service.ErrConflict):
 		s.writeError(w, http.StatusConflict, codeConflict, "revision conflict")
 	default:

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var _ Engine = (*Bitcask)(nil)
@@ -29,6 +30,9 @@ type Bitcask struct {
 	closed bool
 
 	keydir *keydir
+
+	stopSync chan struct{} // closed by Close to stop the interval syncer
+	syncDone chan struct{} // closed when the interval syncer exits
 }
 
 // Open loads the data dir and rebuilds the keydir.
@@ -65,8 +69,9 @@ func Open(opts Options) (*Bitcask, error) {
 		nextID: 1,
 		keydir: newKeydir(),
 	}
-	for _, id := range ids {
-		df, err := openDatafile(opts.Dir, id)
+	for i, id := range ids {
+		// Only the newest file is written to; the rest are immutable.
+		df, err := openDatafile(opts.Dir, id, i < len(ids)-1)
 		if err != nil {
 			b.Close()
 			return nil, fmt.Errorf("storage: %w", err)
@@ -84,7 +89,36 @@ func Open(opts Options) (*Bitcask, error) {
 		b.Close()
 		return nil, fmt.Errorf("storage: recovery: %w", err)
 	}
+
+	if opts.Fsync == FsyncInterval {
+		b.stopSync = make(chan struct{})
+		b.syncDone = make(chan struct{})
+		go b.syncLoop()
+	}
 	return b, nil
+}
+
+// syncLoop fsyncs the active file every SyncInterval until Close stops it.
+func (b *Bitcask) syncLoop() {
+	defer close(b.syncDone)
+	t := time.NewTicker(b.opts.SyncInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-b.stopSync:
+			return
+		case <-t.C:
+			b.fmu.RLock()
+			active := b.active
+			b.fmu.RUnlock()
+			if active == nil {
+				continue
+			}
+			if err := active.sync(); err != nil {
+				b.log.Error("storage: interval sync", "err", err)
+			}
+		}
+	}
 }
 
 // listDatafileIDs returns the IDs of the data files in dir, in ascending order.
@@ -153,11 +187,56 @@ func (b *Bitcask) Get(key []byte) ([]byte, error) {
 	return rec.Value, nil
 }
 
-// Put appends a record to the active file and updates the keydir.
+// Put appends a record to the active file and updates the keydir. The first
+// Put into an empty data dir creates the active file.
 //
-// TODO(build order 3): implement the write path.
+// TODO(build order 4): rotate when the active file exceeds MaxFileSize.
 func (b *Bitcask) Put(key, value []byte) error {
-	return ErrNotImplemented
+	b.wmu.Lock()
+	defer b.wmu.Unlock()
+
+	// Close also takes wmu, so neither closed nor active can change under us.
+	b.fmu.RLock()
+	closed, active := b.closed, b.active
+	b.fmu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+	if active == nil {
+		df, err := createDatafile(b.opts.Dir, b.nextID)
+		if err != nil {
+			return fmt.Errorf("storage: %w", err)
+		}
+		b.fmu.Lock()
+		b.files[df.id] = df
+		b.active = df
+		b.nextID++
+		b.fmu.Unlock()
+		active = df
+	}
+
+	ts := time.Now().UnixNano()
+	buf, err := encodeRecord(ts, key, value, false)
+	if err != nil {
+		return err
+	}
+	off, err := active.append(buf)
+	if err != nil {
+		return fmt.Errorf("storage: put %q: %w", key, err)
+	}
+	if b.opts.Fsync == FsyncAlways {
+		if err := active.sync(); err != nil {
+			return fmt.Errorf("storage: put %q: %w", key, err)
+		}
+	}
+
+	b.keydir.put(string(key), entry{
+		fileID:    active.id,
+		valueOff:  off + int64(headerSize) + int64(len(key)),
+		valueSize: uint32(len(value)),
+		timestamp: ts,
+	})
+	return nil
 }
 
 // Delete appends a tombstone and drops the key from the keydir.
@@ -175,23 +254,38 @@ func (b *Bitcask) Scan(prefix []byte, fn func(key, value []byte) bool) error {
 	return ErrNotImplemented
 }
 
-// Close closes every open data file. It is safe to call twice.
+// Close stops the interval syncer, fsyncs the active file and closes every
+// open data file. It waits for an in-flight Put. It is safe to call twice.
 func (b *Bitcask) Close() error {
+	b.wmu.Lock()
+	defer b.wmu.Unlock()
+
 	b.fmu.Lock()
-	defer b.fmu.Unlock()
 	if b.closed {
+		b.fmu.Unlock()
 		return nil
 	}
 	b.closed = true
+	files, active := b.files, b.active
+	b.files = nil
+	b.active = nil
+	b.fmu.Unlock()
+
+	// fmu is released first: the syncer may be waiting on it.
+	if b.stopSync != nil {
+		close(b.stopSync)
+		<-b.syncDone
+	}
 
 	var firstErr error
-	for _, df := range b.files {
+	if active != nil {
+		firstErr = active.sync()
+	}
+	for _, df := range files {
 		if err := df.close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	b.files = nil
-	b.active = nil
 	if firstErr != nil {
 		return fmt.Errorf("storage: close: %w", firstErr)
 	}
