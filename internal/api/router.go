@@ -13,6 +13,7 @@ import (
 // DocumentService is the slice of the service layer this package needs.
 type DocumentService interface {
 	Get(ctx context.Context, collection, id string) (service.Document, error)
+	Put(ctx context.Context, collection, id string, doc service.Document) (service.Document, bool, error)
 }
 
 // Server routes HTTP requests to the document service.
@@ -32,9 +33,11 @@ func NewServer(docs DocumentService, log *slog.Logger) *Server {
 	return s
 }
 
-// routes registers every handler. Only the document read is wired up so far.
+// routes registers every handler.
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /db/{collection}/{id}", s.handleGetDocument)
+	s.mux.HandleFunc("PUT /db/{collection}/{id}", s.handlePutDocument)
+	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

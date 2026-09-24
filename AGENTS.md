@@ -46,7 +46,7 @@ internal/query/             # parser.go, eval.go
 internal/storage/
     engine.go               # Engine interface, Options, sentinel errors
     bitcask.go              # Open/Get/Put/Delete/Scan/Close
-    datafile.go             # one data file: open, readAt, append
+    datafile.go             # one data file: open/create, readAt, append, sync
     record.go               # record encode/decode + CRC
     keydir.go               # in-memory index
     compaction.go           # Merge
@@ -94,12 +94,12 @@ map[string]entry   // guarded by sync.RWMutex
 ```
 
 ### Operations
-- **Put:** append record to the active file, update keydir, rotate if needed.
+- **Put:** append record to the active file, update keydir, rotate if needed. The keydir stores the value offset: `recordStart + headerSize + len(key)`. The first Put into an empty dir creates `000001.data`; on `Open` the newest file is reopened read-write, older ones read-only.
 - **Get:** keydir lookup, then one `ReadAt` covering the whole record, verify CRC and key.
 - **Delete:** append tombstone, remove key from keydir.
 - **Scan(prefix):** iterate keydir keys with the prefix. O(n) because the hash index is unordered. Document it, don't hide it.
-- **Concurrency:** single writer (`sync.Mutex` on writes), many concurrent readers.
-- **Durability:** fsync policy `always` | `interval` | `never`, default `interval` (1s).
+- **Concurrency:** single writer (`sync.Mutex` on writes), many concurrent readers. Lock order is `wmu` then `fmu`; `Close` takes `wmu` so it waits for an in-flight Put.
+- **Durability:** fsync policy `always` | `interval` | `never`, default `interval` (1s). `always` syncs inside Put; `interval` runs a background `syncLoop` that `Close` stops; `Close` always syncs the active file.
 
 ### Recovery (on `Open`)
 1. List data files in ID order.
@@ -118,7 +118,8 @@ map[string]entry   // guarded by sync.RWMutex
 - Collection names: `[a-z0-9_-]{1,64}`. IDs: non-empty, max 256 bytes, no `/` or NUL.
 - Value: JSON object with reserved fields `_id`, `_rev`, `_updatedAt`.
 - `_rev` is an integer incremented on every write.
-- `PUT` with a stale `_rev` returns `409 Conflict` (optimistic concurrency).
+- `PUT` with a stale `_rev` returns `409 Conflict` (optimistic concurrency). A missing `_rev` counts as 0, so creating needs no `_rev` and replacing needs the current one. A non-integer `_rev` or non-object body is `400`.
+- `_id` is always set from the URL; `_updatedAt` is RFC 3339 UTC. Service `Put` holds one mutex over read-check-write (per-key locks later if needed).
 
 ## HTTP API
 ```
@@ -126,7 +127,7 @@ PUT    /db/{collection}/{id}       create or replace a document (201 created / 2
 GET    /db/{collection}/{id}       read a document
 DELETE /db/{collection}/{id}       delete a document (204)
 POST   /db/{collection}/_find      body: {"filter": {...}, "limit": 20, "skip": 0}
-GET    /healthz
+GET    /healthz                    {"status":"ok"}
 POST   /admin/merge                trigger compaction
 ```
 - Error shape: `{"error": {"code": "not_found", "message": "..."}}`
@@ -137,9 +138,10 @@ POST   /admin/merge                trigger compaction
 ## Current status
 Build order (one step per task):
 
-1. In-memory `Engine` + HTTP CRUD + service layer — **partial**: only `GET /db/{collection}/{id}` is wired
-2. `record.go` + `datafile.go` (encode/decode, CRC) — **decode done**, encode/append pending
-3. Bitcask `Put/Get/Delete` with a single data file — **`Get` done**, `Put` returns `ErrNotImplemented`
+1. In-memory `Engine` + HTTP CRUD + service layer — **partial**: `GET`/`PUT /db/{collection}/{id}` and `GET /healthz` wired; `DELETE` pending
+2. `record.go` + `datafile.go` (encode/decode, CRC) — **done** (`encodeRecord`, `createDatafile`, `append`, `sync`)
+3. Bitcask `Put/Get/Delete` with a single data file — **`Get`/`Put` done** (incl. fsync policies), `Delete` pending
+   - Caveat: until step 4, a restart starts with an empty keydir, so data written before the restart is on disk but not readable.
 4. File rotation + keydir rebuild in `recovery.go` — pending (`rebuildKeydir` is a no-op)
 5. Tombstones + truncated-tail recovery — pending
 6. Compaction (`Merge`) — pending
@@ -180,3 +182,5 @@ Run `gofmt`, `go vet`, and `go test -race ./...` before finishing any task.
 - Keep the layer boundaries. If a change must cross them, stop and ask.
 - Do not create extra files (docs, READMEs, scripts) unless requested.
 - Never commit the `data/` directory or anything written into it.
+- Keep this file current: when a change adds files or changes behaviour described here, update the relevant section (especially **Current status**) in the same task.
+- `memory.md` (gitignored, local only) holds running session context: what was done, decisions, open caveats. Read it at the start of a task and append to it at the end.
