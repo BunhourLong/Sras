@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,8 +11,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
+
+// lockFileName is the file in the data dir that Open holds an exclusive flock
+// on, so a second process (or a second Open) can't use the same dir.
+const lockFileName = "LOCK"
 
 var _ Engine = (*Bitcask)(nil)
 
@@ -21,7 +27,8 @@ type Bitcask struct {
 	opts Options
 	log  *slog.Logger
 
-	wmu sync.Mutex // serialises writers
+	wmu    sync.Mutex // serialises writers
+	lastTS int64      // newest record timestamp; guarded by wmu (set by Open before any Put)
 
 	fmu    sync.RWMutex // guards the fields below
 	files  map[uint32]*datafile
@@ -30,6 +37,8 @@ type Bitcask struct {
 	closed bool
 
 	keydir *keydir
+
+	lock *os.File // holds the flock on the data dir's LOCK file
 
 	stopSync chan struct{} // closed by Close to stop the interval syncer
 	syncDone chan struct{} // closed when the interval syncer exits
@@ -57,8 +66,14 @@ func Open(opts Options) (*Bitcask, error) {
 		return nil, fmt.Errorf("storage: create data dir: %w", err)
 	}
 
+	lock, err := lockDir(opts.Dir)
+	if err != nil {
+		return nil, err
+	}
+
 	ids, err := listDatafileIDs(opts.Dir)
 	if err != nil {
+		lock.Close()
 		return nil, err
 	}
 
@@ -68,6 +83,7 @@ func Open(opts Options) (*Bitcask, error) {
 		files:  make(map[uint32]*datafile, len(ids)),
 		nextID: 1,
 		keydir: newKeydir(),
+		lock:   lock,
 	}
 	for i, id := range ids {
 		// Only the newest file is written to; the rest are immutable.
@@ -85,7 +101,7 @@ func Open(opts Options) (*Bitcask, error) {
 		b.active = b.files[ids[len(ids)-1]]
 	}
 
-	if err := b.rebuildKeydir(); err != nil {
+	if err := b.rebuildKeydir(ids); err != nil {
 		b.Close()
 		return nil, fmt.Errorf("storage: recovery: %w", err)
 	}
@@ -96,6 +112,24 @@ func Open(opts Options) (*Bitcask, error) {
 		go b.syncLoop()
 	}
 	return b, nil
+}
+
+// lockDir takes an exclusive, non-blocking flock on dir/LOCK. The OS drops the
+// lock when the process dies, so a crash never leaves a stale lock behind.
+// flock is Unix-only (macOS/Linux).
+func lockDir(dir string) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(dir, lockFileName), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("storage: open lock file: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("storage: %s: %w", dir, ErrLocked)
+		}
+		return nil, fmt.Errorf("storage: lock data dir: %w", err)
+	}
+	return f, nil
 }
 
 // syncLoop fsyncs the active file every SyncInterval until Close stops it.
@@ -151,12 +185,12 @@ func (b *Bitcask) Get(key []byte) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 
+	// Hold fmu across the read so Close can't close the file under us.
 	b.fmu.RLock()
-	closed := b.closed
+	defer b.fmu.RUnlock()
 	df := b.files[e.fileID]
-	b.fmu.RUnlock()
 
-	if closed {
+	if b.closed {
 		return nil, ErrClosed
 	}
 	if df == nil {
@@ -215,7 +249,9 @@ func (b *Bitcask) Put(key, value []byte) error {
 		active = df
 	}
 
-	ts := time.Now().UnixNano()
+	// Monotonic: a clock that jumps backwards must not make this write lose
+	// to an older one on replay.
+	ts := max(time.Now().UnixNano(), b.lastTS+1)
 	buf, err := encodeRecord(ts, key, value, false)
 	if err != nil {
 		return err
@@ -224,6 +260,7 @@ func (b *Bitcask) Put(key, value []byte) error {
 	if err != nil {
 		return fmt.Errorf("storage: put %q: %w", key, err)
 	}
+	b.lastTS = ts
 	if b.opts.Fsync == FsyncAlways {
 		if err := active.sync(); err != nil {
 			return fmt.Errorf("storage: put %q: %w", key, err)
@@ -285,6 +322,10 @@ func (b *Bitcask) Close() error {
 		if err := df.close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	// Closing the file releases the flock.
+	if err := b.lock.Close(); err != nil && firstErr == nil {
+		firstErr = err
 	}
 	if firstErr != nil {
 		return fmt.Errorf("storage: close: %w", firstErr)
