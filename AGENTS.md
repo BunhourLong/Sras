@@ -80,7 +80,7 @@ type Engine interface {
 ### Files
 - Named `000001.data`, `000002.data`, ... in the data dir.
 - Exactly one **active** file (append-only); all older files are **immutable** and opened read-only.
-- Rotate to a new active file when size exceeds `MaxFileSize` (default 64 MB).
+- Rotate to a new active file when size exceeds `MaxFileSize` (default 64 MB). `Put` rotates *before* appending if the record would push the active file past the limit (only when the file is non-empty, so an oversized record gets its own file). `rotate()` fsyncs the old file, reopens it read-only, creates the next ID, and swaps both under `fmu.Lock`. `syncLoop` holds `fmu.RLock` while syncing.
 
 ### Keydir
 ```go
@@ -95,17 +95,19 @@ map[string]entry   // guarded by sync.RWMutex
 
 ### Operations
 - **Put:** append record to the active file, update keydir, rotate if needed. The keydir stores the value offset: `recordStart + headerSize + len(key)`. The first Put into an empty dir creates `000001.data`; on `Open` the newest file is reopened read-write, older ones read-only.
-- **Get:** keydir lookup, then one `ReadAt` covering the whole record, verify CRC and key.
-- **Delete:** append tombstone, remove key from keydir.
+- **Get:** keydir lookup, then one `ReadAt` covering the whole record (under `fmu.RLock`, so `Close` waits), verify CRC and key.
+- **Delete:** append tombstone, remove key from keydir. A missing key returns `ErrNotFound` and writes nothing. `Put` and `Delete` share `appendRecord` (closed check, lazy create, monotonic ts, rotation, fsync).
 - **Scan(prefix):** iterate keydir keys with the prefix. O(n) because the hash index is unordered. Document it, don't hide it.
 - **Concurrency:** single writer (`sync.Mutex` on writes), many concurrent readers. Lock order is `wmu` then `fmu`; `Close` takes `wmu` so it waits for an in-flight Put.
 - **Durability:** fsync policy `always` | `interval` | `never`, default `interval` (1s). `always` syncs inside Put; `interval` runs a background `syncLoop` that `Close` stops; `Close` always syncs the active file.
 
 ### Recovery (on `Open`)
 1. List data files in ID order.
-2. Replay each record to rebuild the keydir (latest timestamp wins, tombstone removes).
-3. If the tail of the active file is corrupt or truncated, truncate at the last valid record and log a warning.
+2. Replay each record to rebuild the keydir (latest timestamp wins, `>=` so ties go to the later record; tombstone removes).
+3. If the active file has an invalid record, truncate at the last valid record and log a warning. An invalid record in an immutable file returns `ErrCorrupt`.
 4. Never panic on a bad CRC.
+5. `Put` timestamps are monotonic: `max(now, lastTS+1)`, where replay seeds `lastTS`.
+6. `Open` holds an exclusive `flock` on `<dir>/LOCK` until `Close` (`ErrLocked` if taken).
 
 ### Compaction (`Merge`)
 1. Snapshot the immutable file list.
@@ -140,10 +142,11 @@ Build order (one step per task):
 
 1. In-memory `Engine` + HTTP CRUD + service layer — **partial**: `GET`/`PUT /db/{collection}/{id}` and `GET /healthz` wired; `DELETE` pending
 2. `record.go` + `datafile.go` (encode/decode, CRC) — **done** (`encodeRecord`, `createDatafile`, `append`, `sync`)
-3. Bitcask `Put/Get/Delete` with a single data file — **`Get`/`Put` done** (incl. fsync policies), `Delete` pending
-   - Caveat: until step 4, a restart starts with an empty keydir, so data written before the restart is on disk but not readable.
-4. File rotation + keydir rebuild in `recovery.go` — pending (`rebuildKeydir` is a no-op)
-5. Tombstones + truncated-tail recovery — pending
+3. Bitcask `Put/Get/Delete` with a single data file — **done** (incl. fsync policies)
+4. File rotation + keydir rebuild in `recovery.go` — **done** (`rotate()` in `bitcask.go`; `datafile.records` scanner, `rebuildKeydir`)
+5. Tombstones + truncated-tail recovery — **done** (`Delete` writes tombstones; replay honours them; active-file bad tail is truncated + warned; bad immutable file → `ErrCorrupt`)
+
+Also done with recovery: monotonic Put timestamps (`lastTS`), `flock` on `<dir>/LOCK` (`ErrLocked`, Unix only), `Get` holds `fmu.RLock` across `ReadAt`.
 6. Compaction (`Merge`) — pending
 7. Query engine and `_find` endpoint — types in `parser.go` only
 8. Optional: hint files, secondary indexes, TTL, auth
@@ -175,6 +178,7 @@ go test -race ./...
 Run `gofmt`, `go vet`, and `go test -race ./...` before finishing any task.
 
 ## Working rules for agents
+- **Always use the `ponytail` skill** (full level): load it at the start of every task and re-read it at least every 1–2 prompts so it doesn't drift. Its ladder applies to all code: reuse what exists, stdlib first, shortest correct diff, `ponytail:` comments on deliberate corners.
 - **Minimal diffs.** Change only what the task needs. No drive-by refactors, renames, or reformatting.
 - Before a non-trivial change, state the plan in a few lines, then implement.
 - Do not add dependencies without asking.
@@ -184,3 +188,16 @@ Run `gofmt`, `go vet`, and `go test -race ./...` before finishing any task.
 - Never commit the `data/` directory or anything written into it.
 - Keep this file current: when a change adds files or changes behaviour described here, update the relevant section (especially **Current status**) in the same task.
 - `memory.md` (gitignored, local only) holds running session context: what was done, decisions, open caveats. Read it at the start of a task and append to it at the end.
+
+## Roadmap handoff (`GOAL.md`)
+`GOAL.md` (gitignored, local only; skip this section if it doesn't exist) is the step-by-step roadmap. Read its **Next step** section before starting a task. When you finish a task or complete a step (or substep) from it, update `GOAL.md` in the same task, before reporting done:
+1. **Mark progress:** change the step's status (⏳ → 🟡 partial / ✅ done) in its heading and in the phase overview; tick completed substeps.
+2. **Update "Current state":** move finished items into ✅ Done; remove bugs/risks that are fixed; add any new ones found.
+3. **Set the next step:** rewrite section 3 **Next step** to name the next step, its branch name, and *why* it's next (what it unblocks or which bug it fixes). Follow the recommended order unless something discovered during the task changes it, and if so, say why.
+4. **Log it:** add a row to **Progress log** (date, step, branch, commit/PR, notes), and bump "Last updated" at the top.
+5. **Record decisions:** if the task settled a question in **Cross-cutting design decisions**, write down what was chosen.
+6. **Tell the user** in your final message which step is done and which step is next.
+
+**One step per task, then stop.** Work only on the step named in **Next step**, and nothing beyond it. When that step is done and `GOAL.md` is updated, stop and report. Do not start or partly implement the next step, even if it looks small or closely related. The user starts the next step in a new task.
+
+Don't rewrite future phases while doing this; change a later step only if the finished work proved its design wrong, and note why.

@@ -6,7 +6,7 @@ Clients store JSON documents in named collections through a small REST API. Unde
 
 This is a learning project: **correctness and clarity come before performance**. It uses only the Go standard library.
 
-> **Status:** work in progress. Documents can be created, replaced and read over HTTP, but data is **not yet readable after a restart** (keydir rebuild is step 4). See [Roadmap](#roadmap).
+> **Status:** work in progress. Documents can be created, replaced and read over HTTP, and survive a restart (the keydir is rebuilt on startup). Data files rotate at `MaxFileSize`. The engine supports delete (tombstones); the `DELETE` endpoint, scan, query and compaction are still pending. See [Roadmap](#roadmap).
 
 ---
 
@@ -180,7 +180,7 @@ type Engine interface {
 - Named `000001.data`, `000002.data`, ... in the data directory.
 - Exactly one **active** file receives appends. All older files are **immutable** and opened read-only.
 - The first `Put` into an empty directory creates `000001.data`. On `Open`, the newest file is reopened read-write and appends continue after its existing contents.
-- Rotation happens when the active file exceeds `MaxFileSize` (default 64 MB) *(planned, step 4)*.
+- Rotation happens in `Put` when the next record would push the active file past `MaxFileSize` (default 64 MB): the active file is fsynced, reopened read-only, and a new active file is created. A record larger than `MaxFileSize` gets a file of its own.
 
 ### Keydir (in-memory index)
 ```go
@@ -199,12 +199,14 @@ Every live key has exactly one entry pointing at its latest value. The whole key
 |---|---|---|
 | **Put** | Encode record, append to the active file, update the keydir. Keydir stores `recordStart + 20 + len(key)` as the value offset. | One sequential write |
 | **Get** | Keydir lookup, then **one `ReadAt`** that covers the whole record (header + key + value). CRC and key are verified before returning. | One random read |
-| **Delete** *(planned)* | Append a tombstone, remove the key from the keydir | One sequential write |
+| **Delete** | Append a tombstone, remove the key from the keydir. A missing key returns `ErrNotFound` and writes nothing. Shares `Put`'s write path (`appendRecord`), so rotation and fsync apply. | One sequential write |
 | **Scan(prefix)** *(planned)* | Walk every keydir key and match the prefix | **O(n)** over all keys, because a hash index is unordered |
 | **Merge** *(planned)* | Rewrite immutable files, keeping only live records | Background I/O |
 
 ### Concurrency
-- **Single writer:** `Put` holds a write mutex (`wmu`). Many readers run concurrently without it.
+- **Single writer:** `Put` holds a write mutex (`wmu`). Many readers run concurrently without it; `Get` holds `fmu` (read lock) across its `ReadAt`, so `Close` waits for in-flight reads.
+- **One process per data dir:** `Open` takes an exclusive `flock` on `<dir>/LOCK` and fails with `ErrLocked` if it is held. The OS drops the lock if the process dies (Unix only).
+- **Monotonic timestamps:** `Put` uses `max(now, lastTimestamp+1)`, so a clock jumping backwards can't make a newer write lose on replay.
 - **Lock order:** `wmu` before `fmu` (the file-table lock). `Close` takes `wmu`, so it waits for an in-flight `Put` to finish.
 - The service layer adds its own mutex around read-check-write in `Put`, so two concurrent `PUT`s to the same document cannot both succeed with the same `_rev`. It is one lock for all documents; per-key locks are a later optimization if writes contend.
 
@@ -217,11 +219,11 @@ Every live key has exactly one entry pointing at its latest value. The whole key
 
 `Close` always fsyncs the active file, whatever the policy.
 
-### Recovery on `Open` *(planned, steps 4–5)*
+### Recovery on `Open`
 1. List data files in ID order.
-2. Replay every record to rebuild the keydir: latest timestamp wins, a tombstone removes the key.
-3. If the tail of the active file is corrupt or truncated (e.g. a crash mid-write), truncate at the last valid record and log a warning.
-4. Never panic on a bad CRC.
+2. Replay every record sequentially (64 KB buffered reader) to rebuild the keydir: latest timestamp wins (ties go to the later record), a tombstone removes the key.
+3. If the active file has an invalid record (torn write, garbage, bad CRC), truncate it there and log a warning with the number of bytes dropped. An invalid record in an **immutable** file makes `Open` fail with `ErrCorrupt`.
+4. Never panic on a bad CRC; sizes are checked against the file before allocating.
 
 ### Compaction (`Merge`) *(planned, step 6)*
 1. Snapshot the list of immutable files.
@@ -268,7 +270,7 @@ internal/storage/
     record.go               # record encode/decode + CRC
     keydir.go               # in-memory index
     compaction.go           # Merge (planned)
-    recovery.go             # keydir rebuild (planned)
+    recovery.go             # keydir rebuild on Open
     *_test.go               # record, datafile, bitcask tests
 internal/config/config.go   # defaults
 data/                       # runtime data (gitignored)
@@ -300,9 +302,9 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 |---|---|---|
 | 1 | Service layer + HTTP CRUD | 🟡 `GET`, `PUT`, `/healthz` done; `DELETE` pending |
 | 2 | `record.go` + `datafile.go` (encode/decode, CRC, append) | ✅ done |
-| 3 | Bitcask `Put` / `Get` / `Delete` on a single file | 🟡 `Get`, `Put`, fsync policies done; `Delete` pending |
-| 4 | File rotation + keydir rebuild on startup | ⏳ |
-| 5 | Tombstones + truncated-tail recovery | ⏳ |
+| 3 | Bitcask `Put` / `Get` / `Delete` on a single file | ✅ done |
+| 4 | File rotation + keydir rebuild on startup | ✅ done |
+| 5 | Tombstones + truncated-tail recovery | ✅ done |
 | 6 | Compaction (`Merge`) + `/admin/merge` | ⏳ |
 | 7 | Query engine + `_find` endpoint | ⏳ types only |
 | 8 | Optional: hint files, secondary indexes, TTL, auth | ⏳ |
@@ -311,9 +313,9 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 
 ## Known limitations
 
-- **Restarts lose visibility of data.** Records are on disk, but the keydir starts empty until recovery (step 4) replays the files. After a restart every `GET` returns 404.
-- **No rotation yet:** everything goes into `000001.data` regardless of `MaxFileSize`.
-- **No delete, scan, query, or compaction yet.**
+- **Startup time grows with data size:** recovery replays every record (hint files are planned).
+- **Data dir lock uses `flock`:** Unix only (macOS/Linux); no Windows build yet.
+- **No `DELETE` endpoint, scan, query, or compaction yet.**
 - **Keys must fit in RAM:** a Bitcask trait by design. Every live key is held in the keydir.
 - **Scans are O(n):** the keydir is a hash map, so prefix scans (and `_find`) walk every key.
 - **One global write lock in the service layer:** simple and correct, but writes to different documents serialize.
