@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -111,5 +112,132 @@ func TestBitcaskConcurrentPutGet(t *testing.T) {
 	wg.Wait()
 	if n := b.keydir.len(); n != workers*perWorker {
 		t.Fatalf("keydir has %d keys, want %d", n, workers*perWorker)
+	}
+}
+
+func TestBitcaskRotation(t *testing.T) {
+	dir := t.TempDir()
+	const maxSize = 100
+	open := func() *Bitcask {
+		b, err := Open(Options{Dir: dir, Fsync: FsyncNever, MaxFileSize: maxSize})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { b.Close() })
+		return b
+	}
+	b := open()
+	const n = 50
+	for i := 0; i < n; i++ {
+		putAll(t, b, fmt.Sprintf("k/%02d", i), fmt.Sprintf("value-%02d", i))
+	}
+	// One value bigger than MaxFileSize gets a file of its own.
+	big := bytes.Repeat([]byte("x"), 3*maxSize)
+	putAll(t, b, "big", string(big))
+	bigFile := b.active.id
+	putAll(t, b, "after", "1")
+
+	checkAll := func(b *Bitcask) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			wantGet(t, b, fmt.Sprintf("k/%02d", i), fmt.Appendf(nil, "value-%02d", i))
+		}
+		wantGet(t, b, "big", big)
+		wantGet(t, b, "after", []byte("1"))
+	}
+	checkAll(b)
+
+	if len(b.files) < 3 {
+		t.Fatalf("%d data files, want several", len(b.files))
+	}
+	for id, df := range b.files {
+		if df.readOnly != (df != b.active) {
+			t.Fatalf("file %d readOnly=%v, active=%d", id, df.readOnly, b.active.id)
+		}
+		if id != bigFile && df.size > maxSize {
+			t.Fatalf("file %d is %d bytes, max %d", id, df.size, maxSize)
+		}
+	}
+	if b.active.id == bigFile {
+		t.Fatalf("put after the oversized value went into its file %d", bigFile)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Recovery replays every file and keeps appending to the newest.
+	b = open()
+	checkAll(b)
+	putAll(t, b, "k/00", "new")
+	wantGet(t, b, "k/00", []byte("new"))
+}
+
+// After a real rotation, damage in an immutable file must stop Open.
+func TestBitcaskRotatedFileCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	b, err := Open(Options{Dir: dir, Fsync: FsyncNever, MaxFileSize: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		putAll(t, b, fmt.Sprintf("k/%d", i), "some value")
+	}
+	if b.active.id < 2 {
+		t.Fatalf("active file %d, want a rotation", b.active.id)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	path := datafilePath(dir, 1)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[len(data)-1] ^= 0xff
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := Open(Options{Dir: dir}); !errors.Is(err, ErrCorrupt) {
+		if err == nil {
+			b.Close()
+		}
+		t.Fatalf("open: err %v, want ErrCorrupt", err)
+	}
+}
+
+// Readers and the interval syncer must keep working while Puts rotate files.
+func TestBitcaskConcurrentRotation(t *testing.T) {
+	b, err := Open(Options{Dir: t.TempDir(), Fsync: FsyncInterval, SyncInterval: time.Millisecond, MaxFileSize: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	const workers, perWorker = 8, 100
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				key := fmt.Appendf(nil, "k/%d/%d", w, i)
+				val := fmt.Appendf(nil, "v%d", i)
+				if err := b.Put(key, val); err != nil {
+					t.Error(err)
+					return
+				}
+				// Re-read an earlier key, which likely lives in a rotated file.
+				old := fmt.Appendf(nil, "k/%d/%d", w, i/2)
+				if got, err := b.Get(old); err != nil || !bytes.Equal(got, fmt.Appendf(nil, "v%d", i/2)) {
+					t.Errorf("get %s = %q, %v", old, got, err)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	if len(b.files) < 10 {
+		t.Fatalf("%d data files, want many rotations", len(b.files))
 	}
 }
