@@ -43,6 +43,35 @@ func openDatafile(dir string, id uint32) (*datafile, error) {
 	return &datafile{id: id, path: path, f: f, readOnly: true, size: info.Size()}, nil
 }
 
+// createDatafile creates a new, empty active data file. It fails if the file
+// already exists.
+func createDatafile(dir string, id uint32) (*datafile, error) {
+	path := datafilePath(dir, id)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("create data file: %w", err)
+	}
+	return &datafile{id: id, path: path, f: f, readOnly: false}, nil
+}
+
+// append writes buf at the end of the file and returns the offset where it
+// starts. A record's value offset is that plus headerSize + len(key).
+func (d *datafile) append(buf []byte) (int64, error) {
+	off := d.size
+	if _, err := d.f.WriteAt(buf, off); err != nil {
+		return 0, fmt.Errorf("write %s at %d: %w", d.path, off, err)
+	}
+	d.size += int64(len(buf))
+	return off, nil
+}
+
+func (d *datafile) sync() error {
+	if err := d.f.Sync(); err != nil {
+		return fmt.Errorf("sync %s: %w", d.path, err)
+	}
+	return nil
+}
+
 // readAt fills buf from off. A short read means the record is truncated, which
 // is reported as ErrCorrupt.
 func (d *datafile) readAt(buf []byte, off int64) error {

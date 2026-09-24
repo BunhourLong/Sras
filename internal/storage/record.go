@@ -79,3 +79,30 @@ func decodeRecord(buf []byte) (Record, error) {
 	}
 	return rec, nil
 }
+
+// encodeRecord builds one on-disk record. A tombstone carries
+// TombstoneValueSize in the header and no value bytes; value is ignored.
+func encodeRecord(timestamp int64, key, value []byte, tombstone bool) ([]byte, error) {
+	if uint64(len(key)) > math.MaxUint32 {
+		return nil, fmt.Errorf("storage: key is %d bytes, max %d", len(key), uint32(math.MaxUint32))
+	}
+	valueSize := uint32(TombstoneValueSize)
+	if tombstone {
+		value = nil
+	} else {
+		// MaxUint32 itself is reserved for tombstones.
+		if uint64(len(value)) >= math.MaxUint32 {
+			return nil, fmt.Errorf("storage: value is %d bytes, max %d", len(value), uint32(math.MaxUint32-1))
+		}
+		valueSize = uint32(len(value))
+	}
+
+	buf := make([]byte, headerSize+len(key)+len(value))
+	binary.LittleEndian.PutUint64(buf[4:12], uint64(timestamp))
+	binary.LittleEndian.PutUint32(buf[12:16], uint32(len(key)))
+	binary.LittleEndian.PutUint32(buf[16:20], valueSize)
+	n := copy(buf[headerSize:], key)
+	copy(buf[headerSize+n:], value)
+	binary.LittleEndian.PutUint32(buf[0:crcSize], crc32.ChecksumIEEE(buf[crcSize:]))
+	return buf, nil
+}
