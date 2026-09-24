@@ -58,3 +58,44 @@ func TestDocumentCRUD(t *testing.T) {
 		}
 	}
 }
+
+// Regression: after a restart, a PUT without _rev on an existing document
+// must conflict instead of silently re-creating it at rev 1.
+func TestRevSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	put := func(engine storage.Engine, body string) int {
+		t.Helper()
+		ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil))
+		defer ts.Close()
+		req, _ := http.NewRequest("PUT", ts.URL+"/db/users/1", strings.NewReader(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	engine, err := storage.Open(storage.Options{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := put(engine, `{"name":"a"}`); got != 201 {
+		t.Fatalf("create: status %d, want 201", got)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err = storage.Open(storage.Options{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if got := put(engine, `{"name":"b"}`); got != 409 {
+		t.Fatalf("put without _rev after restart: status %d, want 409", got)
+	}
+	if got := put(engine, `{"name":"b","_rev":1}`); got != 200 {
+		t.Fatalf("put with _rev 1 after restart: status %d, want 200", got)
+	}
+}
