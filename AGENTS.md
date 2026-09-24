@@ -80,7 +80,7 @@ type Engine interface {
 ### Files
 - Named `000001.data`, `000002.data`, ... in the data dir.
 - Exactly one **active** file (append-only); all older files are **immutable** and opened read-only.
-- Rotate to a new active file when size exceeds `MaxFileSize` (default 64 MB).
+- Rotate to a new active file when size exceeds `MaxFileSize` (default 64 MB). `Put` rotates *before* appending if the record would push the active file past the limit (only when the file is non-empty, so an oversized record gets its own file). `rotate()` fsyncs the old file, reopens it read-only, creates the next ID, and swaps both under `fmu.Lock`. `syncLoop` holds `fmu.RLock` while syncing.
 
 ### Keydir
 ```go
@@ -143,7 +143,7 @@ Build order (one step per task):
 1. In-memory `Engine` + HTTP CRUD + service layer — **partial**: `GET`/`PUT /db/{collection}/{id}` and `GET /healthz` wired; `DELETE` pending
 2. `record.go` + `datafile.go` (encode/decode, CRC) — **done** (`encodeRecord`, `createDatafile`, `append`, `sync`)
 3. Bitcask `Put/Get/Delete` with a single data file — **`Get`/`Put` done** (incl. fsync policies), `Delete` pending
-4. File rotation + keydir rebuild in `recovery.go` — **keydir rebuild done** (`datafile.records` scanner, `rebuildKeydir`); rotation pending
+4. File rotation + keydir rebuild in `recovery.go` — **done** (`rotate()` in `bitcask.go`; `datafile.records` scanner, `rebuildKeydir`)
 5. Tombstones + truncated-tail recovery — **recovery done** (replay honours tombstones; active-file bad tail is truncated + warned; bad immutable file → `ErrCorrupt`); `Delete` pending
 
 Also done with recovery: monotonic Put timestamps (`lastTS`), `flock` on `<dir>/LOCK` (`ErrLocked`, Unix only), `Get` holds `fmu.RLock` across `ReadAt`.

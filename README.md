@@ -6,7 +6,7 @@ Clients store JSON documents in named collections through a small REST API. Unde
 
 This is a learning project: **correctness and clarity come before performance**. It uses only the Go standard library.
 
-> **Status:** work in progress. Documents can be created, replaced and read over HTTP, and survive a restart (the keydir is rebuilt on startup). Delete, rotation, scan, query and compaction are still pending. See [Roadmap](#roadmap).
+> **Status:** work in progress. Documents can be created, replaced and read over HTTP, and survive a restart (the keydir is rebuilt on startup). Data files rotate at `MaxFileSize`. Delete, scan, query and compaction are still pending. See [Roadmap](#roadmap).
 
 ---
 
@@ -180,7 +180,7 @@ type Engine interface {
 - Named `000001.data`, `000002.data`, ... in the data directory.
 - Exactly one **active** file receives appends. All older files are **immutable** and opened read-only.
 - The first `Put` into an empty directory creates `000001.data`. On `Open`, the newest file is reopened read-write and appends continue after its existing contents.
-- Rotation happens when the active file exceeds `MaxFileSize` (default 64 MB) *(planned, step 4)*.
+- Rotation happens in `Put` when the next record would push the active file past `MaxFileSize` (default 64 MB): the active file is fsynced, reopened read-only, and a new active file is created. A record larger than `MaxFileSize` gets a file of its own.
 
 ### Keydir (in-memory index)
 ```go
@@ -303,7 +303,7 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 | 1 | Service layer + HTTP CRUD | 🟡 `GET`, `PUT`, `/healthz` done; `DELETE` pending |
 | 2 | `record.go` + `datafile.go` (encode/decode, CRC, append) | ✅ done |
 | 3 | Bitcask `Put` / `Get` / `Delete` on a single file | 🟡 `Get`, `Put`, fsync policies done; `Delete` pending |
-| 4 | File rotation + keydir rebuild on startup | 🟡 keydir rebuild done; rotation pending |
+| 4 | File rotation + keydir rebuild on startup | ✅ done |
 | 5 | Tombstones + truncated-tail recovery | 🟡 truncated-tail recovery + tombstone replay done; `Delete` pending |
 | 6 | Compaction (`Merge`) + `/admin/merge` | ⏳ |
 | 7 | Query engine + `_find` endpoint | ⏳ types only |
@@ -315,7 +315,6 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 
 - **Startup time grows with data size:** recovery replays every record (hint files are planned).
 - **Data dir lock uses `flock`:** Unix only (macOS/Linux); no Windows build yet.
-- **No rotation yet:** everything goes into `000001.data` regardless of `MaxFileSize`.
 - **No delete, scan, query, or compaction yet.**
 - **Keys must fit in RAM:** a Bitcask trait by design. Every live key is held in the keydir.
 - **Scans are O(n):** the keydir is a hash map, so prefix scans (and `_find`) walk every key.

@@ -142,15 +142,14 @@ func (b *Bitcask) syncLoop() {
 		case <-b.stopSync:
 			return
 		case <-t.C:
+			// Hold fmu across the sync so rotation can't close the file under us.
 			b.fmu.RLock()
-			active := b.active
+			if b.active != nil {
+				if err := b.active.sync(); err != nil {
+					b.log.Error("storage: interval sync", "err", err)
+				}
+			}
 			b.fmu.RUnlock()
-			if active == nil {
-				continue
-			}
-			if err := active.sync(); err != nil {
-				b.log.Error("storage: interval sync", "err", err)
-			}
 		}
 	}
 }
@@ -222,9 +221,8 @@ func (b *Bitcask) Get(key []byte) ([]byte, error) {
 }
 
 // Put appends a record to the active file and updates the keydir. The first
-// Put into an empty data dir creates the active file.
-//
-// TODO(build order 4): rotate when the active file exceeds MaxFileSize.
+// Put into an empty data dir creates the active file, and a record that would
+// push the active file past MaxFileSize goes into a new one.
 func (b *Bitcask) Put(key, value []byte) error {
 	b.wmu.Lock()
 	defer b.wmu.Unlock()
@@ -256,6 +254,12 @@ func (b *Bitcask) Put(key, value []byte) error {
 	if err != nil {
 		return err
 	}
+	// size > 0: a record larger than MaxFileSize still gets a file of its own.
+	if active.size > 0 && active.size+int64(len(buf)) > b.opts.MaxFileSize {
+		if active, err = b.rotate(active); err != nil {
+			return fmt.Errorf("storage: put %q: %w", key, err)
+		}
+	}
 	off, err := active.append(buf)
 	if err != nil {
 		return fmt.Errorf("storage: put %q: %w", key, err)
@@ -274,6 +278,36 @@ func (b *Bitcask) Put(key, value []byte) error {
 		timestamp: ts,
 	})
 	return nil
+}
+
+// rotate makes old immutable and starts a new active file. The caller holds
+// wmu. old is synced first so an immutable file is always fully durable, then
+// reopened read-only; readers still using the old handle finish before the swap.
+func (b *Bitcask) rotate(old *datafile) (*datafile, error) {
+	if err := old.sync(); err != nil {
+		return nil, err
+	}
+	ro, err := openDatafile(b.opts.Dir, old.id, true)
+	if err != nil {
+		return nil, err
+	}
+	df, err := createDatafile(b.opts.Dir, b.nextID)
+	if err != nil {
+		ro.close()
+		return nil, err
+	}
+
+	b.fmu.Lock()
+	b.files[old.id] = ro
+	b.files[df.id] = df
+	b.active = df
+	b.nextID++
+	b.fmu.Unlock()
+
+	if err := old.close(); err != nil {
+		b.log.Warn("storage: close rotated data file", "err", err)
+	}
+	return df, nil
 }
 
 // Delete appends a tombstone and drops the key from the keydir.
