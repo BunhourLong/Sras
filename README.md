@@ -72,6 +72,8 @@ Stop the server with `Ctrl+C`. It shuts down gracefully: in-flight requests get 
 | `DELETE` | `/db/{collection}/{id}` | Delete a document (204) | ⏳ planned |
 | `POST` | `/db/{collection}/_find` | Query with a filter | ⏳ planned |
 | `POST` | `/admin/merge` | Trigger compaction | ⏳ planned |
+| `GET` | `/docs` | Swagger UI (loads assets from the jsdelivr CDN) | ✅ implemented |
+| `GET` | `/openapi.yaml` | OpenAPI 3 spec (`internal/api/openapi.yaml`, embedded) | ✅ implemented |
 
 ### `PUT /db/{collection}/{id}`
 - Body must be a JSON **object**, at most **1 MB**. Arrays, `null`, and invalid JSON return `400`.

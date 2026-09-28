@@ -1,0 +1,87 @@
+openapi: 3.0.3
+info:
+  title: Sras
+  description: HTTP document database on a Bitcask-style storage engine.
+  version: 0.1.0
+paths:
+  /healthz:
+    get:
+      summary: Liveness check
+      responses:
+        "200":
+          description: Server is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+  /db/{collection}/{id}:
+    parameters:
+      - name: collection
+        in: path
+        required: true
+        schema: { type: string, pattern: "^[a-z0-9_-]{1,64}$", example: users }
+      - name: id
+        in: path
+        required: true
+        description: Non-empty, max 256 bytes, no "/" or NUL.
+        schema: { type: string, example: alice }
+    get:
+      summary: Read a document
+      responses:
+        "200":
+          description: The document
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Document" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+    put:
+      summary: Create or replace a document
+      description: >
+        Omit `_rev` to create. To replace, send the current `_rev`;
+        a stale one returns 409. `_id` and `_updatedAt` are set by the server.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Document" }
+            example: { name: Alice, age: 30 }
+      responses:
+        "200":
+          description: Replaced
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Document" }
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Document" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+components:
+  schemas:
+    Document:
+      type: object
+      additionalProperties: true
+      properties:
+        _id: { type: string, readOnly: true }
+        _rev: { type: integer, minimum: 0 }
+        _updatedAt: { type: string, format: date-time, readOnly: true }
+  responses:
+    Error:
+      description: Error envelope
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  code: { type: string, enum: [bad_request, not_found, conflict, internal] }
+                  message: { type: string }

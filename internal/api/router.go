@@ -38,6 +38,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /db/{collection}/{id}", s.handleGetDocument)
 	s.mux.HandleFunc("PUT /db/{collection}/{id}", s.handlePutDocument)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /openapi.yaml", handleOpenAPI)
+	s.mux.HandleFunc("GET /docs", handleDocs)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

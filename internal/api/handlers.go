@@ -1,6 +1,7 @@
 package api
 
 import (
+	_ "embed"
 	"encoding/json"
 	"net/http"
 
@@ -43,4 +44,29 @@ func (s *Server) handlePutDocument(w http.ResponseWriter, r *http.Request) {
 // handleHealthz serves GET /healthz.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+//go:embed openapi.yaml
+var openAPISpec []byte
+
+// handleOpenAPI serves GET /openapi.yaml.
+func handleOpenAPI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/yaml")
+	w.Write(openAPISpec)
+}
+
+// docsPage renders Swagger UI against /openapi.yaml.
+// ponytail: Swagger UI comes from a CDN, so /docs needs internet; vendor it if that matters.
+const docsPage = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Sras API</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+</head><body><div id="ui"></div>
+<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>SwaggerUIBundle({url: "/openapi.yaml", dom_id: "#ui"})</script>
+</body></html>`
+
+// handleDocs serves GET /docs.
+func handleDocs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(docsPage))
 }
