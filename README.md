@@ -6,7 +6,7 @@ Clients store JSON documents in named collections through a small REST API. Unde
 
 This is a learning project: **correctness and clarity come before performance**. It uses only the Go standard library.
 
-> **Status:** work in progress. Documents can be created, replaced, read and deleted over HTTP, and survive a restart (the keydir is rebuilt on startup). Data files rotate at `MaxFileSize`. Scan, query and compaction are still pending. See [Roadmap](#roadmap).
+> **Status:** work in progress. Documents can be created, replaced, read and deleted over HTTP, and survive a restart (the keydir is rebuilt on startup). Data files rotate at `MaxFileSize`. The engine can prefix-scan; query and compaction are still pending. See [Roadmap](#roadmap).
 
 ---
 
@@ -207,7 +207,7 @@ Every live key has exactly one entry pointing at its latest value. The whole key
 | **Put** | Encode record, append to the active file, update the keydir. Keydir stores `recordStart + 20 + len(key)` as the value offset. | One sequential write |
 | **Get** | Keydir lookup, then **one `ReadAt`** that covers the whole record (header + key + value). CRC and key are verified before returning. | One random read |
 | **Delete** | Append a tombstone, remove the key from the keydir. A missing key returns `ErrNotFound` and writes nothing. Shares `Put`'s write path (`appendRecord`), so rotation and fsync apply. | One sequential write |
-| **Scan(prefix)** *(planned)* | Walk every keydir key and match the prefix | **O(n)** over all keys, because a hash index is unordered |
+| **Scan(prefix)** | Snapshot matching keydir keys, sort them, then `Get` each and call `fn` until it returns false. No lock is held during `fn`; a key deleted after the snapshot is skipped. | **O(n)** over all keys + **O(k log k)** sort, because a hash index is unordered |
 | **Merge** *(planned)* | Rewrite immutable files, keeping only live records | Background I/O |
 
 ### Concurrency
@@ -296,7 +296,7 @@ go test -race ./...
 Current coverage:
 - **`record_test.go`:** encode/decode round-trips (normal value, empty value, tombstone), plus a flipped byte in each case must return `ErrCorrupt`.
 - **`datafile_test.go`:** creating an existing file fails; append two records, sync, and read each value back at `recordStart + 20 + len(key)`.
-- **`bitcask_test.go`:** Put/Get/overwrite under all three fsync policies, `ErrClosed` after `Close`, reopening appends to the existing file, and a concurrent Put/Get test (8 goroutines × 100 keys) run with `-race`.
+- **`bitcask_test.go`:** Put/Get/overwrite under all three fsync policies, `ErrClosed` after `Close`, reopening appends to the existing file, and a concurrent Put/Get test (8 goroutines × 100 keys) run with `-race`. Scan: prefixes (`users/` vs `user` vs `""`), sorted order, early stop, deleted keys skipped, after reopen, `ErrClosed`, a callback that writes, and a concurrent writer with rotation under `-race`.
 - **`handlers_test.go`:** full HTTP flow through `httptest` against a real engine in `t.TempDir()`: healthz, 404, create 201, replace 200, stale `_rev` 409, bad `_rev` / non-object / `null` body / bad collection 400, delete 204 (via `?rev=` and `If-Match`), delete stale rev 409, delete missing 404, re-create after delete.
 
 Conventions: data directories always come from `t.TempDir()`, and every bug fix gets a regression test.
@@ -322,7 +322,7 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 
 - **Startup time grows with data size:** recovery replays every record (hint files are planned).
 - **Data dir lock uses `flock`:** Unix only (macOS/Linux); no Windows build yet.
-- **No scan, query, or compaction yet.**
+- **No query (`_find`) or compaction yet.**
 - **Keys must fit in RAM:** a Bitcask trait by design. Every live key is held in the keydir.
 - **Scans are O(n):** the keydir is a hash map, so prefix scans (and `_find`) walk every key.
 - **One global write lock in the service layer:** simple and correct, but writes to different documents serialize.

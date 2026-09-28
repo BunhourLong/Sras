@@ -337,12 +337,36 @@ func (b *Bitcask) Delete(key []byte) error {
 	return nil
 }
 
-// Scan walks every keydir key with the given prefix. The hash index is
-// unordered, so this is O(n) over all live keys.
+// Scan calls fn for every key with the given prefix, in sorted key order, until
+// fn returns false. The hash index is unordered, so this is O(n) over all live
+// keys plus O(k log k) to sort the k matches.
 //
-// TODO(build order 7): implement the scan.
+// Keys are snapshotted first and no lock is held while fn runs, so fn may
+// write. Each value is read at call time: a key deleted after the snapshot is
+// skipped, and one overwritten after it yields the newer value.
 func (b *Bitcask) Scan(prefix []byte, fn func(key, value []byte) bool) error {
-	return ErrNotImplemented
+	b.fmu.RLock()
+	closed := b.closed
+	b.fmu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+
+	keys := b.keydir.keys(string(prefix))
+	sort.Strings(keys)
+	for _, k := range keys {
+		v, err := b.Get([]byte(k))
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("storage: scan %q: %w", prefix, err)
+		}
+		if !fn([]byte(k), v) {
+			return nil
+		}
+	}
+	return nil
 }
 
 // Close stops the interval syncer, fsyncs the active file and closes every
