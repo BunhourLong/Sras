@@ -63,6 +63,26 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "500": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a document
+      description: >
+        Optional revision precondition via `?rev=N` or `If-Match: "N"`
+        (the query parameter wins); a stale one returns 409.
+      parameters:
+        - name: rev
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0 }
+        - name: If-Match
+          in: header
+          required: false
+          schema: { type: string, example: '"3"' }
+      responses:
+        "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
 components:
   schemas:
     Document:

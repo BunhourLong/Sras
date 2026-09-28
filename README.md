@@ -6,7 +6,7 @@ Clients store JSON documents in named collections through a small REST API. Unde
 
 This is a learning project: **correctness and clarity come before performance**. It uses only the Go standard library.
 
-> **Status:** work in progress. Documents can be created, replaced and read over HTTP, and survive a restart (the keydir is rebuilt on startup). Data files rotate at `MaxFileSize`. The engine supports delete (tombstones); the `DELETE` endpoint, scan, query and compaction are still pending. See [Roadmap](#roadmap).
+> **Status:** work in progress. Documents can be created, replaced, read and deleted over HTTP, and survive a restart (the keydir is rebuilt on startup). Data files rotate at `MaxFileSize`. Scan, query and compaction are still pending. See [Roadmap](#roadmap).
 
 ---
 
@@ -69,7 +69,7 @@ Stop the server with `Ctrl+C`. It shuts down gracefully: in-flight requests get 
 | `GET` | `/healthz` | Liveness check, returns `{"status":"ok"}` | ✅ implemented |
 | `GET` | `/db/{collection}/{id}` | Read a document | ✅ implemented |
 | `PUT` | `/db/{collection}/{id}` | Create (201) or replace (200) a document | ✅ implemented |
-| `DELETE` | `/db/{collection}/{id}` | Delete a document (204) | ⏳ planned |
+| `DELETE` | `/db/{collection}/{id}` | Delete a document (204) | ✅ implemented |
 | `POST` | `/db/{collection}/_find` | Query with a filter | ⏳ planned |
 | `POST` | `/admin/merge` | Trigger compaction | ⏳ planned |
 | `GET` | `/docs` | Swagger UI (loads assets from the jsdelivr CDN) | ✅ implemented |
@@ -84,6 +84,11 @@ Stop the server with `Ctrl+C`. It shuts down gracefully: in-flight requests get 
 
 ### `GET /db/{collection}/{id}`
 Returns `200` with the document, or `404` if it doesn't exist.
+
+### `DELETE /db/{collection}/{id}`
+- Returns `204 No Content`, or `404` if the document doesn't exist.
+- **Optional precondition:** `?rev=N` or `If-Match: "N"` (the query parameter wins). If it doesn't match the stored `_rev`, you get `409`. A non-integer rev returns `400`. Without either, the delete is unconditional.
+- After a delete, a `PUT` without `_rev` creates the document again at `_rev` 1.
 
 ### `POST /db/{collection}/_find` (planned)
 ```json
@@ -255,12 +260,12 @@ Logs are structured (`log/slog`, text format) on stdout.
 cmd/server/main.go          # flags, wiring, graceful shutdown
 internal/api/
     router.go               # Server, DocumentService interface, routes
-    handlers.go             # GET/PUT document, healthz
+    handlers.go             # GET/PUT/DELETE document, healthz
     errors.go               # error envelope, service error -> status mapping
     middleware.go           # (empty, reserved)
     handlers_test.go        # end-to-end CRUD via httptest + real engine
 internal/service/
-    documents.go            # Get, Put, _rev handling, ID validation
+    documents.go            # Get, Put, Delete, _rev handling, ID validation
     collections.go          # collection name validation
 internal/query/
     parser.go               # filter / FindRequest types
@@ -292,7 +297,7 @@ Current coverage:
 - **`record_test.go`:** encode/decode round-trips (normal value, empty value, tombstone), plus a flipped byte in each case must return `ErrCorrupt`.
 - **`datafile_test.go`:** creating an existing file fails; append two records, sync, and read each value back at `recordStart + 20 + len(key)`.
 - **`bitcask_test.go`:** Put/Get/overwrite under all three fsync policies, `ErrClosed` after `Close`, reopening appends to the existing file, and a concurrent Put/Get test (8 goroutines × 100 keys) run with `-race`.
-- **`handlers_test.go`:** full HTTP flow through `httptest` against a real engine in `t.TempDir()`: healthz, 404, create 201, replace 200, stale `_rev` 409, bad `_rev` / non-object / `null` body / bad collection 400.
+- **`handlers_test.go`:** full HTTP flow through `httptest` against a real engine in `t.TempDir()`: healthz, 404, create 201, replace 200, stale `_rev` 409, bad `_rev` / non-object / `null` body / bad collection 400, delete 204 (via `?rev=` and `If-Match`), delete stale rev 409, delete missing 404, re-create after delete.
 
 Conventions: data directories always come from `t.TempDir()`, and every bug fix gets a regression test.
 
@@ -302,7 +307,7 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 
 | # | Step | Status |
 |---|---|---|
-| 1 | Service layer + HTTP CRUD | 🟡 `GET`, `PUT`, `/healthz` done; `DELETE` pending |
+| 1 | Service layer + HTTP CRUD | ✅ `GET`, `PUT`, `DELETE`, `/healthz` done |
 | 2 | `record.go` + `datafile.go` (encode/decode, CRC, append) | ✅ done |
 | 3 | Bitcask `Put` / `Get` / `Delete` on a single file | ✅ done |
 | 4 | File rotation + keydir rebuild on startup | ✅ done |
@@ -317,7 +322,7 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 
 - **Startup time grows with data size:** recovery replays every record (hint files are planned).
 - **Data dir lock uses `flock`:** Unix only (macOS/Linux); no Windows build yet.
-- **No `DELETE` endpoint, scan, query, or compaction yet.**
+- **No scan, query, or compaction yet.**
 - **Keys must fit in RAM:** a Bitcask trait by design. Every live key is held in the keydir.
 - **Scans are O(n):** the keydir is a hash map, so prefix scans (and `_find`) walk every key.
 - **One global write lock in the service layer:** simple and correct, but writes to different documents serialize.

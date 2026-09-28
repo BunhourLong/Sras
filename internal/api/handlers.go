@@ -4,6 +4,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"sras/internal/service"
 )
@@ -39,6 +41,29 @@ func (s *Server) handlePutDocument(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusCreated
 	}
 	s.writeJSON(w, status, saved)
+}
+
+// handleDeleteDocument serves DELETE /db/{collection}/{id}: 204 on success. An
+// optional revision precondition comes from ?rev=N or If-Match: "N".
+func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
+	var rev *int64
+	v := r.URL.Query().Get("rev")
+	if v == "" {
+		v = strings.Trim(r.Header.Get("If-Match"), `"`)
+	}
+	if v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			s.writeError(w, http.StatusBadRequest, codeBadRequest, "rev must be a non-negative integer")
+			return
+		}
+		rev = &n
+	}
+	if err := s.docs.Delete(r.Context(), r.PathValue("collection"), r.PathValue("id"), rev); err != nil {
+		s.writeServiceError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleHealthz serves GET /healthz.

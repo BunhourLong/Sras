@@ -135,6 +135,31 @@ func (d *Documents) Put(ctx context.Context, collection, id string, doc Document
 	return doc, curRev == 0, nil
 }
 
+// Delete removes a document, or returns ErrNotFound. When rev is non-nil it
+// must match the stored _rev, otherwise Delete returns ErrConflict.
+func (d *Documents) Delete(ctx context.Context, collection, id string, rev *int64) error {
+	d.wmu.Lock()
+	defer d.wmu.Unlock()
+
+	cur, err := d.Get(ctx, collection, id)
+	if err != nil {
+		return err
+	}
+	if rev != nil {
+		curRev, err := revOf(cur)
+		if err != nil {
+			return fmt.Errorf("stored %s/%s: %w", collection, id, err)
+		}
+		if *rev != curRev {
+			return fmt.Errorf("delete %s/%s: _rev %d, current %d: %w", collection, id, *rev, curRev, ErrConflict)
+		}
+	}
+	if err := d.engine.Delete([]byte(documentKey(collection, id))); err != nil {
+		return fmt.Errorf("delete %s/%s: %w", collection, id, err)
+	}
+	return nil
+}
+
 // revOf reads _rev as a non-negative integer; a missing _rev is 0. JSON
 // numbers decode as float64, a freshly set one is int64.
 func revOf(doc Document) (int64, error) {
