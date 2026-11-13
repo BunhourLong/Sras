@@ -11,9 +11,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// requestTimeout bounds every request handled by the API.
-// shortcut: fixed value until 2.4 makes it configurable.
-const requestTimeout = 30 * time.Second
+// defaultRequestTimeout bounds every request handled by the API when
+// NewServer is called with a timeout of 0 or less.
+const defaultRequestTimeout = 30 * time.Second
 
 // requestIDKey is the unexported context key under which withRequestID
 // stores the request ID.
@@ -148,10 +148,10 @@ func (s *Server) withRecover(next http.Handler) http.Handler {
 	})
 }
 
-// withTimeout bounds every request's context at requestTimeout.
+// withTimeout bounds every request's context at the server's timeout.
 func (s *Server) withTimeout(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), s.timeout)
 		defer cancel()
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

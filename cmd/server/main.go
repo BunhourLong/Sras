@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,12 +21,22 @@ import (
 )
 
 func main() {
-	cfg := config.Default()
-	flag.StringVar(&cfg.Addr, "addr", cfg.Addr, "HTTP listen address")
-	flag.StringVar(&cfg.DataDir, "data", cfg.DataDir, "data directory")
-	flag.Parse()
+	cfg, err := config.Load(os.Args[1:], os.LookupEnv)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0) // usage already printed by Load's FlagSet
+		}
+		fmt.Fprintf(os.Stderr, "sras: %v\n", err)
+		os.Exit(2)
+	}
 
-	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logOpts := &slog.HandlerOptions{Level: cfg.LogLevel}
+	var log *slog.Logger
+	if cfg.LogFormat == "json" {
+		log = slog.New(slog.NewJSONHandler(os.Stdout, logOpts))
+	} else {
+		log = slog.New(slog.NewTextHandler(os.Stdout, logOpts))
+	}
 
 	engine, err := storage.Open(storage.Options{
 		Dir:          cfg.DataDir,
@@ -42,12 +53,12 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           api.NewServer(service.NewDocuments(engine, log), log),
+		Handler:           api.NewServer(service.NewDocuments(engine, log), log, cfg.RequestTimeout),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		// WriteTimeout covers the whole response; keep it above the api
-		// request timeout (30s).
-		WriteTimeout: 45 * time.Second,
+		// request timeout.
+		WriteTimeout: cfg.RequestTimeout + 15*time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -55,7 +66,15 @@ func main() {
 	defer stop()
 
 	go func() {
-		log.Info("listening", "addr", cfg.Addr, "data", cfg.DataDir)
+		log.Info("listening",
+			"addr", cfg.Addr,
+			"data", cfg.DataDir,
+			"fsync", cfg.Fsync,
+			"max_file_size", cfg.MaxFileSize,
+			"sync_interval", cfg.SyncInterval,
+			"request_timeout", cfg.RequestTimeout,
+			"log_format", cfg.LogFormat,
+			"log_level", cfg.LogLevel)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("serve", "err", err)
 			stop()

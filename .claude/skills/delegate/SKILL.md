@@ -92,8 +92,9 @@ rebuild its own context.
 - **Sequential when one job needs another's output:** writer → its reviewer,
   fix → re-review, two jobs on the same file, a storage change and the service
   code that uses it.
-- **Still one roadmap step per task.** Parallel writers split one step; only
-  this session picks steps, and only this session updates `GOAL.md` and
+- **Two independent roadmap steps may run at once** when their files are
+  disjoint (e.g. an api step beside a query step); only this session picks
+  steps, and only this session updates `GOAL.md` and
   `memory.md`, at close.
 - **This session keeps working while workers run** (reading, planning), but
   never polls. It runs tests only when no worker is editing that checkout, and

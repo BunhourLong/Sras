@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -34,7 +35,7 @@ var crashHTTPClient = &http.Client{Timeout: 5 * time.Second}
 // TestMain re-enters this binary as the server child when SRAS_CRASH_CHILD is
 // set: main() binds, serves and blocks until the test SIGKILLs it. In the
 // normal (parent) mode it just runs the tests. flag.Parse is deliberately not
-// called here, so main's own flag.Parse parses the child's -addr/-data.
+// called here; main's config.Load parses the child's -addr/-data.
 func TestMain(m *testing.M) {
 	if os.Getenv("SRAS_CRASH_CHILD") == "1" {
 		main()
@@ -162,7 +163,14 @@ func freeAddr(t *testing.T) string {
 func startChild(t *testing.T, addr, dataDir string) *childProc {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-addr", addr, "-data", dataDir)
-	cmd.Env = append(os.Environ(), "SRAS_CRASH_CHILD=1")
+	// drop ambient SRAS_* config so the child runs with the defaults this
+	// test was written against
+	cmd.Env = []string{"SRAS_CRASH_CHILD=1"}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "SRAS_") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
 	out := &syncBuf{}
 	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Start(); err != nil {
