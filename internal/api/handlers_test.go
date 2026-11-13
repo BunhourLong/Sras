@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"sras/internal/service"
 	"sras/internal/storage"
 )
@@ -64,6 +66,111 @@ func TestDocumentCRUD(t *testing.T) {
 				t.Fatalf("%s: body %v, want _id 1 and _rev %v", s.name, body, s.rev)
 			}
 		}
+	}
+}
+
+func TestCreateDocument(t *testing.T) {
+	engine, err := storage.Open(storage.Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil))
+	defer ts.Close()
+
+	do := func(method, path, body string) (*http.Response, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		json.NewDecoder(resp.Body).Decode(&got)
+		resp.Body.Close()
+		return resp, got
+	}
+
+	// a. create: the server generates the id, a body _id is ignored.
+	resp, doc := do("POST", "/db/users", `{"name":"a","_id":"mine"}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: status %d, want 201 (body %v)", resp.StatusCode, doc)
+	}
+	if doc["_rev"] != float64(1) {
+		t.Fatalf("create: _rev %v, want 1", doc["_rev"])
+	}
+	id, ok := doc["_id"].(string)
+	if !ok || id == "mine" {
+		t.Fatalf("create: _id %v, want a server-generated id", doc["_id"])
+	}
+	if doc["_updatedAt"] == nil || doc["name"] != "a" {
+		t.Fatalf("create: body %v, want _updatedAt set and name a", doc)
+	}
+	u, err := uuid.Parse(id)
+	if err != nil {
+		t.Fatalf("create: _id %q: %v", id, err)
+	}
+	if u.Version() != 7 {
+		t.Fatalf("create: _id version %d, want 7", u.Version())
+	}
+	if loc := resp.Header.Get("Location"); loc != "/db/users/"+id {
+		t.Fatalf("create: Location %q, want %q", loc, "/db/users/"+id)
+	}
+
+	// b. the Location path reads the document back.
+	resp, got := do("GET", resp.Header.Get("Location"), "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("read back: status %d, want 200 (body %v)", resp.StatusCode, got)
+	}
+	if got["_id"] != id || got["name"] != "a" {
+		t.Fatalf("read back: body %v, want _id %s and name a", got, id)
+	}
+
+	// c. further creates get distinct, strictly ascending UUIDv7 ids.
+	ids := []string{id}
+	for i := 0; i < 3; i++ {
+		resp, d := do("POST", "/db/users", `{"name":"b"}`)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create %d: status %d, want 201 (body %v)", i, resp.StatusCode, d)
+		}
+		next, ok := d["_id"].(string)
+		if !ok {
+			t.Fatalf("create %d: _id %v, want a string", i, d["_id"])
+		}
+		ids = append(ids, next)
+	}
+	for i := 1; i < len(ids); i++ {
+		if ids[i] <= ids[i-1] {
+			t.Fatalf("ids not strictly ascending: %s then %s", ids[i-1], ids[i])
+		}
+	}
+
+	// d. the same error cases as PUT.
+	steps := []struct {
+		name, path, body string
+		status           int
+	}{
+		{"bad collection", "/db/Users", `{}`, 400},
+		{"not an object", "/db/users", `[1]`, 400},
+		{"null body", "/db/users", `null`, 400},
+		{"bad rev", "/db/users", `{"_rev":"x"}`, 400},
+		{"stale rev", "/db/users", `{"_rev":3}`, 409},
+		{"rev 0 creates", "/db/users", `{"_rev":0}`, 201},
+	}
+	for _, s := range steps {
+		resp, _ := do("POST", s.path, s.body)
+		if resp.StatusCode != s.status {
+			t.Fatalf("%s: status %d, want %d", s.name, resp.StatusCode, s.status)
+		}
+	}
+
+	// e. the generated id works with the existing endpoints.
+	resp, got = do("PUT", "/db/users/"+ids[0], `{"_rev":1}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("put: status %d, want 200 (body %v)", resp.StatusCode, got)
+	}
+	if got["_rev"] != float64(2) {
+		t.Fatalf("put: _rev %v, want 2", got["_rev"])
 	}
 }
 

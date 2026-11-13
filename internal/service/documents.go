@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"sras/internal/storage"
 )
 
@@ -133,6 +135,18 @@ func (d *Documents) Put(ctx context.Context, collection, id string, doc Document
 		return nil, false, fmt.Errorf("put %s/%s: %w", collection, id, err)
 	}
 	return doc, curRev == 0, nil
+}
+
+// Create stores the document under a server-generated UUIDv7 id and returns
+// it with the reserved fields set. Any _id in the body is ignored; the _rev
+// rules are Put's: absent or 0 creates, any other integer is ErrConflict.
+func (d *Documents) Create(ctx context.Context, collection string, doc Document) (Document, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return nil, fmt.Errorf("generate id: %w", err)
+	}
+	saved, _, err := d.Put(ctx, collection, id.String(), doc)
+	return saved, err
 }
 
 // Delete removes a document, or returns ErrNotFound. When rev is non-nil it

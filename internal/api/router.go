@@ -14,23 +14,29 @@ import (
 type DocumentService interface {
 	Get(ctx context.Context, collection, id string) (service.Document, error)
 	Put(ctx context.Context, collection, id string, doc service.Document) (service.Document, bool, error)
+	Create(ctx context.Context, collection string, doc service.Document) (service.Document, error)
 	Delete(ctx context.Context, collection, id string, rev *int64) error
 }
 
 // Server routes HTTP requests to the document service.
 type Server struct {
-	docs DocumentService
-	log  *slog.Logger
-	mux  *http.ServeMux
+	docs    DocumentService
+	log     *slog.Logger
+	mux     *http.ServeMux
+	handler http.Handler // the middleware chain wrapping mux
 }
 
-// NewServer builds the router.
+// NewServer builds the router and its middleware chain: request ID, access
+// log, panic recovery, timeout and body limit, outermost first.
 func NewServer(docs DocumentService, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
+	// stamp request IDs onto every record this package logs
+	log = slog.New(contextHandler{log.Handler()})
 	s := &Server{docs: docs, log: log, mux: http.NewServeMux()}
 	s.routes()
+	s.handler = s.withRequestID(s.withAccessLog(s.withRecover(s.withTimeout(s.withBodyLimit(s.mux)))))
 	return s
 }
 
@@ -38,12 +44,14 @@ func NewServer(docs DocumentService, log *slog.Logger) *Server {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /db/{collection}/{id}", s.handleGetDocument)
 	s.mux.HandleFunc("PUT /db/{collection}/{id}", s.handlePutDocument)
+	s.mux.HandleFunc("POST /db/{collection}", s.handleCreateDocument)
 	s.mux.HandleFunc("DELETE /db/{collection}/{id}", s.handleDeleteDocument)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /openapi.yaml", handleOpenAPI)
 	s.mux.HandleFunc("GET /docs", handleDocs)
 }
 
+// ServeHTTP applies the middleware chain, then routes.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	s.handler.ServeHTTP(w, r)
 }
