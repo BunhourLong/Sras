@@ -19,7 +19,8 @@ follows its brief only.
    change, name the expected input/output and appropriate tests. Documentation
    and configuration edits need relevant validation, not artificial TDD.
 3. Read the resulting diff and run the configured gates yourself. Freeze only
-   this task's diff, including new files, and request one independent review.
+   this task's diff, including new files, and request the configured
+   independent review(s).
    Judge concrete findings; a confirmed bug gets a regression test and a fix.
    Re-run affected checks after fixes; report unresolved findings honestly.
 4. Update `GOAL.md` and `memory.md` after checks and review pass. Report changes,

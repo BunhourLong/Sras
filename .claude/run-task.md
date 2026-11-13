@@ -15,18 +15,24 @@
 
 | Job | Model | Use |
 |---|---|---|
-| Implementation, tests, fixes | `opencode-go/glm-5.3-flash` | Default writer, `variant: max` |
-| Exploration or routine review | `opencode-go/deepseek-v4.1-flash` | Default reader/reviewer, `variant: max` |
-| Focused exploration | Codex `gpt-6-luna` | Codex alternative, `reasoningEffort: medium` |
+| Exploration (scouts), implementation, tests, fixes | `opencode-go/glm-5.3-flash` | Default scout and writer (cheapest), `variant: max`; several scouts may run at once |
+| Routine review | `opencode-go/deepseek-v4.1-flash` | Default reviewer, `variant: max` |
 | Complex implementation or tests | Codex `gpt-6.1-sol` | High-risk writer, `reasoningEffort: high` |
 | Difficult storage/concurrency review | Codex `gpt-6-astra` | High-risk reviewer, `reasoningEffort: high` |
 
-Use one writer and one independent reviewer per task, rather than running the
-entire roster: routine work goes GLM → DeepSeek; high-risk work (the list above)
+Each work item gets one writer and its independent reviewer, rather than the
+entire roster (a step split across parallel writers, or a second review model,
+follows "Run workers at the same time"): routine work goes GLM → DeepSeek; high-risk work (the list above)
 goes Sol → Astra. Opus stays the orchestrator. Do not silently substitute a model
 on limits or unavailability: record the failure and ask for a routing change
 unless the user already authorized a fallback. These are routing defaults, not
-benchmark results or guarantees of account access.
+benchmark results or guarantees of account access. Luna is not used: GLM
+scouts do all exploration (user decision, 2026-11-13).
+
+Workers that can't conflict run at the same time, including several copies of
+one model: GLM scouts on separate questions, reviews of one frozen diff next to
+each other, writers on disjoint files in separate worktrees. The rules are in
+the `delegate` skill's "Run workers at the same time".
 
 Workers start only through T3's native `delegate_task` (see the `/delegate`
 skill). OpenCode models use the `opencode` provider instance, always at
