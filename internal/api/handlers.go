@@ -23,11 +23,12 @@ func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, doc)
 }
 
-// decodeDocument reads the body as a JSON object (max 1 MB); anything else is
-// a 400. Used by both document-writing handlers.
+// decodeDocument reads the body as a JSON object; the size is capped by the
+// body-limit middleware. Anything else is a 400. Used by both
+// document-writing handlers.
 func (s *Server) decodeDocument(w http.ResponseWriter, r *http.Request) (service.Document, bool) {
 	var doc service.Document
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&doc); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&doc); err != nil {
 		s.writeError(w, http.StatusBadRequest, codeBadRequest, "body must be a JSON object")
 		return nil, false
 	}

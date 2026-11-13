@@ -32,6 +32,7 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		// The status line is already out; all that is left is to record it.
+		// shortcut: writeJSON has no request, so this line has no request ID.
 		s.log.Error("write response body", "err", err)
 	}
 }
@@ -55,7 +56,7 @@ func (s *Server) writeServiceError(w http.ResponseWriter, r *http.Request, err e
 	case errors.Is(err, service.ErrConflict):
 		s.writeError(w, http.StatusConflict, codeConflict, "revision conflict")
 	default:
-		s.log.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
+		s.log.ErrorContext(r.Context(), "request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 		s.writeError(w, http.StatusInternalServerError, codeInternal, "internal error")
 	}
 }

@@ -44,6 +44,11 @@ func main() {
 		Addr:              cfg.Addr,
 		Handler:           api.NewServer(service.NewDocuments(engine, log), log),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		// WriteTimeout covers the whole response; keep it above the api
+		// request timeout (30s).
+		WriteTimeout: 45 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

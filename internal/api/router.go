@@ -20,18 +20,23 @@ type DocumentService interface {
 
 // Server routes HTTP requests to the document service.
 type Server struct {
-	docs DocumentService
-	log  *slog.Logger
-	mux  *http.ServeMux
+	docs    DocumentService
+	log     *slog.Logger
+	mux     *http.ServeMux
+	handler http.Handler // the middleware chain wrapping mux
 }
 
-// NewServer builds the router.
+// NewServer builds the router and its middleware chain: request ID, access
+// log, panic recovery, timeout and body limit, outermost first.
 func NewServer(docs DocumentService, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
+	// stamp request IDs onto every record this package logs
+	log = slog.New(contextHandler{log.Handler()})
 	s := &Server{docs: docs, log: log, mux: http.NewServeMux()}
 	s.routes()
+	s.handler = s.withRequestID(s.withAccessLog(s.withRecover(s.withTimeout(s.withBodyLimit(s.mux)))))
 	return s
 }
 
@@ -46,6 +51,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /docs", handleDocs)
 }
 
+// ServeHTTP applies the middleware chain, then routes.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	s.handler.ServeHTTP(w, r)
 }
