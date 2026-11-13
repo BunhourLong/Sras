@@ -4,7 +4,7 @@ An HTTP document database (NoSQL) written in Go, built on a **Bitcask-style** st
 
 Clients store JSON documents in named collections through a small REST API. Underneath, every write is appended to a log file on disk, and an in-memory hash index remembers where the latest version of each key lives, so a read is one map lookup plus one disk read.
 
-This is a learning project: **correctness and clarity come before performance**. It uses only the Go standard library.
+This is a learning project: **correctness and clarity come before performance**. It uses only the Go standard library, plus `github.com/google/uuid` for server-generated ids.
 
 > **Status:** work in progress. Documents can be created, replaced, read and deleted over HTTP, and survive a restart (the keydir is rebuilt on startup). Data files rotate at `MaxFileSize`. The engine can prefix-scan and compact (`Merge`); query and the `/admin/merge` endpoint are still pending. See [Roadmap](#roadmap).
 
@@ -46,6 +46,10 @@ curl -s localhost:8080/healthz
 curl -s -X PUT localhost:8080/db/users/42 -d '{"name":"Ada","role":"admin"}'
 # 201 {"_id":"42","_rev":1,"_updatedAt":"2026-09-24T10:00:00.123456789Z","name":"Ada","role":"admin"}
 
+# or let the server pick the id (a time-ordered UUIDv7)
+curl -s -i -X POST localhost:8080/db/users -d '{"name":"Grace"}'
+# 201 {...} with a Location: /db/users/<generated-id> header
+
 # read it back
 curl -s localhost:8080/db/users/42
 
@@ -69,6 +73,7 @@ Stop the server with `Ctrl+C`. It shuts down gracefully: in-flight requests get 
 | `GET` | `/healthz` | Liveness check, returns `{"status":"ok"}` | ✅ implemented |
 | `GET` | `/db/{collection}/{id}` | Read a document | ✅ implemented |
 | `PUT` | `/db/{collection}/{id}` | Create (201) or replace (200) a document | ✅ implemented |
+| `POST` | `/db/{collection}` | Create with a server-generated UUIDv7 id (201 + `Location`) | ✅ implemented |
 | `DELETE` | `/db/{collection}/{id}` | Delete a document (204) | ✅ implemented |
 | `POST` | `/db/{collection}/_find` | Query with a filter | ⏳ planned |
 | `POST` | `/admin/merge` | Trigger compaction | ⏳ planned |
@@ -81,6 +86,12 @@ Stop the server with `Ctrl+C`. It shuts down gracefully: in-flight requests get 
 - **Replace:** send the document's current `_rev`. Returns `200 OK` with `_rev` incremented.
 - **Conflict:** a `_rev` that doesn't match the stored one returns `409 Conflict`. Sending no `_rev` for an existing document is also a conflict, so you can't overwrite by accident.
 - `_rev` must be a non-negative integer, otherwise `400`.
+
+### `POST /db/{collection}`
+Same rules as the create case of `PUT`: the body must be a JSON object (at most **1 MB**), `_rev` must be absent or `0`, and the same invalid bodies return `400`. A non-zero `_rev` returns `409`.
+- The server generates the id: a **UUIDv7**, which is time-ordered, so ids sort by creation time.
+- Any `_id` in the body is **ignored**.
+- Returns `201 Created` with the saved document and a `Location: /db/{collection}/{id}` header.
 
 ### `GET /db/{collection}/{id}`
 Returns `200` with the document, or `404` if it doesn't exist.
@@ -120,7 +131,7 @@ Every error uses the same envelope:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `_id` | string | Always set from the URL |
+| `_id` | string | Set from the URL on `PUT`; a server-generated UUIDv7 on `POST` (a body `_id` is ignored) |
 | `_rev` | integer | Starts at 1, incremented on every write. Used for optimistic concurrency. |
 | `_updatedAt` | string | RFC 3339 timestamp (UTC, nanosecond precision) of the last write |
 

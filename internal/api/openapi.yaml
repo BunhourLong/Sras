@@ -83,6 +83,37 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "500": { $ref: "#/components/responses/Error" }
+  /db/{collection}:
+    parameters:
+      - name: collection
+        in: path
+        required: true
+        schema: { type: string, pattern: "^[a-z0-9_-]{1,64}$", example: users }
+    post:
+      summary: Create a document with a server-generated id
+      description: >
+        The id is a server-generated UUIDv7 (time-ordered); any `_id` in the
+        body is ignored. The body must be a JSON object. `_rev` rules as when
+        creating with PUT: omit it or send 0; anything else returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Document" }
+            example: { name: Alice, age: 30 }
+      responses:
+        "201":
+          description: Created; the Location header points at the new document
+          headers:
+            Location:
+              description: /db/{collection}/{id} of the created document
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Document" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
 components:
   schemas:
     Document:

@@ -14,6 +14,7 @@ import (
 type DocumentService interface {
 	Get(ctx context.Context, collection, id string) (service.Document, error)
 	Put(ctx context.Context, collection, id string, doc service.Document) (service.Document, bool, error)
+	Create(ctx context.Context, collection string, doc service.Document) (service.Document, error)
 	Delete(ctx context.Context, collection, id string, rev *int64) error
 }
 
@@ -38,6 +39,7 @@ func NewServer(docs DocumentService, log *slog.Logger) *Server {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /db/{collection}/{id}", s.handleGetDocument)
 	s.mux.HandleFunc("PUT /db/{collection}/{id}", s.handlePutDocument)
+	s.mux.HandleFunc("POST /db/{collection}", s.handleCreateDocument)
 	s.mux.HandleFunc("DELETE /db/{collection}/{id}", s.handleDeleteDocument)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /openapi.yaml", handleOpenAPI)
