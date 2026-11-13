@@ -228,15 +228,15 @@ Every live key has exactly one entry pointing at its latest value. The whole key
 
 ### Recovery on `Open`
 1. List data files in ID order.
-2. Replay every record sequentially (64 KB buffered reader) to rebuild the keydir: latest timestamp wins (ties go to the later record), a tombstone removes the key.
-3. If the active file has an invalid record (torn write, garbage, bad CRC), truncate it there and log a warning with the number of bytes dropped. An invalid record in an **immutable** file makes `Open` fail with `ErrCorrupt`.
+2. For immutable merge outputs, use a validated `.hint` file (keys and entry metadata, no values) to rebuild the keydir. Missing hints fall back silently to scanning; invalid or unreadable hints warn and fall back to scanning the whole data file. Other files, including the active file, are scanned sequentially (64 KB buffered reader). Latest timestamp wins (ties go to the later record); a tombstone removes the key.
+3. If the active file has an invalid record (torn write, garbage, bad CRC), truncate it there and log a warning with the number of bytes dropped. An invalid record in a scanned **immutable** file makes `Open` fail with `ErrCorrupt`. A valid hint skips the immutable data scan, so value corruption surfaces at `Get` (CRC) instead of at `Open`.
 4. Never panic on a bad CRC; sizes are checked against the file before allocating.
 
 ### Compaction (`Merge`)
 1. Snapshot the list of immutable files (every file except the active one). One merge runs at a time; `Close` waits for it.
-2. Copy only live entries (those the keydir still points at) into new `NNNNNN.data.tmp` files, capped at `MaxFileSize`, keeping their timestamps. Tombstones are dropped: the snapshot holds every immutable file, so no older copy of the key survives.
-3. Under the write lock: rotate the active file so later writes get IDs above the outputs, re-tombstone any copied key that was deleted mid-merge, fsync, rename the outputs to `.data`, fsync the dir, then swap the keydir entries (a Put or Delete during the merge wins) and drop the old files.
-4. Delete the old files in ascending ID order. A crash at any step replays correctly; `Open` removes leftover `*.data.tmp` files.
+2. Copy only live entries (those the keydir still points at) into new `NNNNNN.data.tmp` files, capped at `MaxFileSize`, keeping their timestamps. Tombstones are dropped: the snapshot holds every immutable file, so no older copy of the key survives. Write and fsync a matching `.hint.tmp` for each output: `SRHT` magic, version 1, data-file size, timestamp/key-size/value-size/value-offset/key entries, and a whole-file CRC32 trailer (little endian).
+3. Under the write lock: rotate the active file so later writes get IDs above the outputs, re-tombstone any copied key that was deleted mid-merge, fsync, rename each `.data.tmp` then its `.hint.tmp`, fsync the dir, then swap the keydir entries (a Put or Delete during the merge wins) and drop the old files.
+4. Delete the old files in ascending ID order, each hint before its data file. A crash at any step replays correctly; `Open` removes leftover `*.data.tmp`, `*.hint.tmp`, and orphan numbered `.hint` files. Failed merges clean up both kinds of temporary files.
 5. The active file is never touched; reads and writes keep working during a merge.
 
 ---
@@ -278,8 +278,9 @@ internal/storage/
     record.go               # record encode/decode + CRC
     keydir.go               # in-memory index
     compaction.go           # Merge
+    hint.go                 # merge hint files: keys, offsets, whole-file CRC
     recovery.go             # keydir rebuild on Open
-    *_test.go               # record, datafile, bitcask, recovery, compaction tests
+    *_test.go               # record, datafile, bitcask, recovery, compaction, hint tests
 internal/config/config.go   # defaults
 data/                       # runtime data (gitignored)
 ```
@@ -299,6 +300,7 @@ Current coverage:
 - **`datafile_test.go`:** creating an existing file fails; append two records, sync, and read each value back at `recordStart + 20 + len(key)`.
 - **`bitcask_test.go`:** Put/Get/overwrite under all three fsync policies, `ErrClosed` after `Close`, reopening appends to the existing file, and a concurrent Put/Get test (8 goroutines × 100 keys) run with `-race`. Scan: prefixes (`users/` vs `user` vs `""`), sorted order, early stop, deleted keys skipped, after reopen, `ErrClosed`, a callback that writes, and a concurrent writer with rotation under `-race`.
 - **`compaction_test.go`:** Merge shrinks disk usage and keeps latest values and deletes, a second merge over merged files, reopen, `ErrClosed`; a crash before/while deleting old files (every suffix left behind) plus a leftover `.tmp`; Put and Delete between copy and swap (regression: resurrected key); concurrent Put/Get/Delete during repeated merges under `-race`.
+- **`hint_test.go`:** hint round-trips and validation, identical keydir/timestamps with hints or scans, deferred value CRC detection, invalid/unreadable hint fallback and warnings, active hints ignored, second-merge cleanup, failed-merge cleanup, and temporary/orphan hint removal.
 - **`handlers_test.go`:** full HTTP flow through `httptest` against a real engine in `t.TempDir()`: healthz, 404, create 201, replace 200, stale `_rev` 409, bad `_rev` / non-object / `null` body / bad collection 400, delete 204 (via `?rev=` and `If-Match`), delete stale rev 409, delete missing 404, re-create after delete.
 
 Conventions: data directories always come from `t.TempDir()`, and every bug fix gets a regression test.
@@ -316,13 +318,13 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 | 5 | Tombstones + truncated-tail recovery | ✅ done |
 | 6 | Compaction (`Merge`) + `/admin/merge` | 🟡 `Merge` done, endpoint pending |
 | 7 | Query engine + `_find` endpoint | ⏳ types only |
-| 8 | Optional: hint files, secondary indexes, TTL, auth | ⏳ |
+| 8 | Hint files; optional secondary indexes, TTL, auth | 🟡 merge hints done; others pending |
 
 ---
 
 ## Known limitations
 
-- **Startup time grows with data size:** recovery replays every record (hint files are planned).
+- **Startup time grows with keys and unmerged data:** valid merge hints skip values; other files still require a full replay.
 - **Data dir lock uses `flock`:** Unix only (macOS/Linux); no Windows build yet.
 - **No query (`_find`) yet, and no automatic compaction:** `Merge` must be called explicitly (no dead-bytes trigger, no HTTP endpoint yet).
 - **Keys must fit in RAM:** a Bitcask trait by design. Every live key is held in the keydir.

@@ -81,6 +81,10 @@ func Open(opts Options) (*Bitcask, error) {
 		lock.Close()
 		return nil, err
 	}
+	if err := removeOrphanHints(opts.Dir, ids); err != nil {
+		lock.Close()
+		return nil, err
+	}
 
 	b := &Bitcask{
 		opts:   opts,

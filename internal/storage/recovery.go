@@ -1,15 +1,37 @@
 package storage
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"os"
+)
 
-// rebuildKeydir replays every data file in ID order (ids ascending) to rebuild
-// the in-memory index: the latest timestamp wins (ties go to the later record)
+// rebuildKeydir uses immutable hints or scans data files in ID order (ids
+// ascending): the latest timestamp wins (ties go to the later record)
 // and a tombstone removes the key. A corrupt or truncated tail on the active
 // file is truncated at the last valid record and logged; corruption in an
-// immutable file is ErrCorrupt. A bad CRC never panics.
+// immutable file without a valid hint is ErrCorrupt. With a valid hint the
+// immutable .data is not scanned at Open, so value corruption surfaces at Get
+// (CRC) instead of ErrCorrupt at Open. A bad CRC never panics.
 func (b *Bitcask) rebuildKeydir(ids []uint32) error {
 	for _, id := range ids {
 		df := b.files[id]
+		if df != b.active {
+			entries, err := readHint(b.opts.Dir, id, df.size)
+			if err == nil {
+				for _, e := range entries {
+					b.lastTS = max(b.lastTS, e.timestamp)
+					if cur, ok := b.keydir.get(e.key); ok && e.timestamp < cur.timestamp {
+						continue
+					}
+					b.keydir.put(e.key, e.entry)
+				}
+				continue
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				b.log.Warn("storage: ignoring invalid hint; scanning data file", "file", hintPath(b.opts.Dir, id), "err", err)
+			}
+		}
 		validEnd, err := df.records(func(off int64, rec Record) error {
 			b.lastTS = max(b.lastTS, rec.Timestamp)
 			key := string(rec.Key)

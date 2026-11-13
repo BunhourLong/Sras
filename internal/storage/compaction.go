@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,8 +56,14 @@ func (b *Bitcask) Merge() error {
 		err = b.installMerge(olds, outs, moves)
 	}
 	if err != nil {
+		// Outputs are never in b.files on error, and the keydir still points at
+		// the old files, so drop renamed outputs too: a stray .data the engine
+		// doesn't track would outlive a later merge that drops its tombstones.
 		for _, o := range outs {
-			os.Remove(o.path) // the .tmp; gone already if it was renamed
+			hint := hintPath(b.opts.Dir, o.id)
+			for _, p := range []string{o.path, datafilePath(b.opts.Dir, o.id), hint + tmpExt, hint} {
+				os.Remove(p) // missing ones are fine
+			}
 		}
 		return fmt.Errorf("storage: merge: %w", err)
 	}
@@ -66,6 +73,9 @@ func (b *Bitcask) Merge() error {
 	for _, df := range olds {
 		if err := df.close(); err != nil {
 			b.log.Warn("storage: merge: close old data file", "err", err)
+		}
+		if err := os.Remove(hintPath(b.opts.Dir, df.id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("storage: merge: remove old hint: %w", err)
 		}
 		if err := os.Remove(df.path); err != nil {
 			return fmt.Errorf("storage: merge: %w", err)
@@ -152,6 +162,18 @@ func (b *Bitcask) createMergeFile() (*datafile, error) {
 // installMerge makes the outputs live and takes olds out of the engine, under
 // wmu. The on-disk steps are ordered so a crash at any point replays correctly.
 func (b *Bitcask) installMerge(olds, outs []*datafile, moves []moved) error {
+	// copyLive has finished; build each hint in data-file order before taking
+	// the write lock, so ordinary writes can continue during hint I/O.
+	hints := make(map[uint32][]hintEntry, len(outs))
+	for _, m := range moves {
+		hints[m.new.fileID] = append(hints[m.new.fileID], hintEntry{key: m.key, entry: m.new})
+	}
+	for _, o := range outs {
+		if err := writeHint(b.opts.Dir, o.id, o.size, hints[o.id]); err != nil {
+			return err
+		}
+	}
+
 	b.wmu.Lock()
 	defer b.wmu.Unlock()
 
@@ -178,6 +200,11 @@ func (b *Bitcask) installMerge(olds, outs []*datafile, moves []moved) error {
 			if err := os.Rename(o.path, datafilePath(b.opts.Dir, o.id)); err != nil {
 				closeAll(ros)
 				return fmt.Errorf("rename merge file: %w", err)
+			}
+			hint := hintPath(b.opts.Dir, o.id)
+			if err := os.Rename(hint+tmpExt, hint); err != nil {
+				closeAll(ros)
+				return fmt.Errorf("rename merge hint: %w", err)
 			}
 			ro, err := openDatafile(b.opts.Dir, o.id, true)
 			if err != nil {
@@ -224,13 +251,15 @@ func syncDir(dir string) error {
 
 // removeMergeTemps deletes .tmp outputs left by a merge that didn't finish.
 func removeMergeTemps(dir string) error {
-	tmps, err := filepath.Glob(filepath.Join(dir, "*"+datafileExt+tmpExt))
-	if err != nil {
-		return fmt.Errorf("storage: list merge temp files: %w", err)
-	}
-	for _, p := range tmps {
-		if err := os.Remove(p); err != nil {
-			return fmt.Errorf("storage: remove merge temp file: %w", err)
+	for _, ext := range []string{datafileExt, hintExt} {
+		tmps, err := filepath.Glob(filepath.Join(dir, "*"+ext+tmpExt))
+		if err != nil {
+			return fmt.Errorf("storage: list merge temp files: %w", err)
+		}
+		for _, p := range tmps {
+			if err := os.Remove(p); err != nil {
+				return fmt.Errorf("storage: remove merge temp file: %w", err)
+			}
 		}
 	}
 	return nil
