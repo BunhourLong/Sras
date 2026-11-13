@@ -4,7 +4,7 @@
 - Session notes: `memory.md`; append outcomes, decisions, caveats, and the brief/role/model needed to re-dispatch.
 - Scratch: `.delegate/` (ignored); keep briefs, frozen diffs, reports, and logs here.
 - Search: `rg`, then targeted line ranges. No graph service needed.
-- Gates: `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...`.
+- Gates: `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... && go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...`.
 - Focused test: `go test -race ./internal/storage -run '^TestName$'` (choose the affected package).
 - Constraints: `AGENTS.md`; ponytail full; no dependencies, record format changes, or layer-boundary changes without the required user decision.
 - High risk: record encoding, recovery, compaction, fsync, file lifecycle, lock ordering, and revision conflict checks. Include restart/crash and race cases as applicable.

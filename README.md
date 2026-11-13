@@ -304,6 +304,7 @@ data/                       # runtime data (gitignored)
 gofmt -l .           # should print nothing
 go vet ./...
 go test -race ./...
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...
 ```
 
 Current coverage:
@@ -353,7 +354,7 @@ One branch per build step, created from an up-to-date `main`, named `<layer>/<wh
 git checkout main && git pull origin main
 git checkout -b storage/rotation
 # ... work, then:
-gofmt -l . && go vet ./... && go test -race ./...
+gofmt -l . && go vet ./... && go test -race ./... && go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...
 git push -u origin storage/rotation   # open a PR into main
 ```
 
