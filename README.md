@@ -254,15 +254,20 @@ Every live key has exactly one entry pointing at its latest value. The whole key
 
 ## Configuration
 
-| Setting | Flag | Default | Notes |
-|---|---|---|---|
-| Listen address | `-addr` | `:8080` | |
-| Data directory | `-data` | `./data` | Created if missing |
-| Max data file size | — | 64 MB | Set in `internal/config`; no flag yet |
-| Fsync policy | — | `interval` | `always` / `interval` / `never`; no flag yet |
-| Sync interval | — | `1s` | Used when policy is `interval` |
+| Setting | Flag | Env | Default | Notes |
+|---|---|---|---|---|
+| Listen address | `-addr` | `SRAS_ADDR` | `:8080` | |
+| Data directory | `-data` | `SRAS_DATA` | `./data` | Created if missing |
+| Max data file size | `-max-file-size` | `SRAS_MAX_FILE_SIZE` | `67108864` (64 MB) | In bytes |
+| Fsync policy | `-fsync` | `SRAS_FSYNC` | `interval` | `always` / `interval` / `never` |
+| Sync interval | `-sync-interval` | `SRAS_SYNC_INTERVAL` | `1s` | Used when policy is `interval` |
+| Request timeout | `-request-timeout` | `SRAS_REQUEST_TIMEOUT` | `30s` | Bounds every request's context |
+| Log format | `-log-format` | `SRAS_LOG_FORMAT` | `text` | `text` or `json` |
+| Log level | `-log-level` | `SRAS_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
-Logs are structured (`log/slog`, text format) on stdout.
+Every setting can be given as a flag or an `SRAS_*` environment variable; precedence is flag > env > default, and an empty variable counts as unset. A value that fails config validation (bad syntax, unknown policy or format, a size or duration ≤ 0) stops startup with exit code 2.
+
+Logs are structured (`log/slog`) on stdout, in text or JSON per `-log-format`.
 
 ---
 
@@ -342,7 +347,6 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 - **Keys must fit in RAM:** a Bitcask trait by design. Every live key is held in the keydir.
 - **Scans are O(n):** the keydir is a hash map, so prefix scans (and `_find`) walk every key.
 - **One global write lock in the service layer:** simple and correct, but writes to different documents serialize.
-- Fsync policy and max file size aren't exposed as flags yet.
 
 ---
 

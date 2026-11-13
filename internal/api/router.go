@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"sras/internal/service"
 )
@@ -22,19 +23,25 @@ type DocumentService interface {
 type Server struct {
 	docs    DocumentService
 	log     *slog.Logger
+	timeout time.Duration // bounds every request's context
 	mux     *http.ServeMux
 	handler http.Handler // the middleware chain wrapping mux
 }
 
 // NewServer builds the router and its middleware chain: request ID, access
-// log, panic recovery, timeout and body limit, outermost first.
-func NewServer(docs DocumentService, log *slog.Logger) *Server {
+// log, panic recovery, timeout and body limit, outermost first. timeout
+// bounds every request's context; timeout <= 0 means defaultRequestTimeout
+// (30s).
+func NewServer(docs DocumentService, log *slog.Logger, timeout time.Duration) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
 	// stamp request IDs onto every record this package logs
 	log = slog.New(contextHandler{log.Handler()})
-	s := &Server{docs: docs, log: log, mux: http.NewServeMux()}
+	s := &Server{docs: docs, log: log, timeout: timeout, mux: http.NewServeMux()}
 	s.routes()
 	s.handler = s.withRequestID(s.withAccessLog(s.withRecover(s.withTimeout(s.withBodyLimit(s.mux)))))
 	return s

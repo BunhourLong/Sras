@@ -19,7 +19,7 @@ func TestDocumentCRUD(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer engine.Close()
-	ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil))
+	ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil, 0))
 	defer ts.Close()
 
 	steps := []struct {
@@ -75,7 +75,7 @@ func TestCreateDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer engine.Close()
-	ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil))
+	ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil, 0))
 	defer ts.Close()
 
 	do := func(method, path, body string) (*http.Response, map[string]any) {
@@ -180,7 +180,7 @@ func TestDeleteIfMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer engine.Close()
-	ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil))
+	ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil, 0))
 	defer ts.Close()
 
 	do := func(method, ifMatch, body string) int {
@@ -214,7 +214,7 @@ func TestRevSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	put := func(engine storage.Engine, body string) int {
 		t.Helper()
-		ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil))
+		ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil, 0))
 		defer ts.Close()
 		req, _ := http.NewRequest("PUT", ts.URL+"/db/users/1", strings.NewReader(body))
 		resp, err := http.DefaultClient.Do(req)

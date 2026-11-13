@@ -70,7 +70,7 @@ func newLoggedServer(t *testing.T, docs DocumentService) (*httptest.Server, *syn
 	if docs == nil {
 		docs = service.NewDocuments(engine, log)
 	}
-	return httptest.NewServer(NewServer(docs, log)), buf
+	return httptest.NewServer(NewServer(docs, log, 0)), buf
 }
 
 // envCode returns the error envelope's code, failing if the body has none.
@@ -93,7 +93,7 @@ func TestRequestID(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer engine.Close()
-	ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil))
+	ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil, 0))
 	defer ts.Close()
 
 	do := func(header string) string {
@@ -189,7 +189,7 @@ func TestRecover(t *testing.T) {
 	t.Cleanup(func() { engine.Close() })
 	buf := &syncBuffer{}
 	log := slog.New(slog.NewJSONHandler(buf, nil))
-	s := NewServer(service.NewDocuments(engine, log), log)
+	s := NewServer(service.NewDocuments(engine, log), log, 0)
 	s.mux.HandleFunc("GET /panic", func(w http.ResponseWriter, r *http.Request) {
 		panic("boom")
 	})
@@ -260,37 +260,55 @@ func TestRecover(t *testing.T) {
 }
 
 // TestRequestTimeout checks that the timeout middleware gives every request
-// context a deadline close to requestTimeout.
+// context a deadline close to the timeout passed to NewServer, and that a
+// timeout of 0 falls back to the 30s default.
 func TestRequestTimeout(t *testing.T) {
-	engine, err := storage.Open(storage.Options{Dir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { engine.Close() })
-	s := NewServer(service.NewDocuments(engine, nil), nil)
-	s.mux.HandleFunc("GET /timeout", func(w http.ResponseWriter, r *http.Request) {
-		dl, ok := r.Context().Deadline()
-		if !ok {
-			http.Error(w, "no deadline in the request context", http.StatusInternalServerError)
-			return
-		}
-		if until := time.Until(dl); until <= 0 || until > requestTimeout {
-			http.Error(w, fmt.Sprintf("deadline in %v, want within %v", until, requestTimeout), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	ts := httptest.NewServer(s)
-	defer ts.Close()
+	for _, tt := range []struct {
+		name       string
+		timeout    time.Duration
+		wantWithin time.Duration // deadline is at most this far away
+		wantAbove  time.Duration // and at least this far away
+	}{
+		{"default", 0, 30 * time.Second, 29 * time.Second},
+		{"configured", 2 * time.Second, 2 * time.Second, 1 * time.Second},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			engine, err := storage.Open(storage.Options{Dir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { engine.Close() })
+			s := NewServer(service.NewDocuments(engine, nil), nil, tt.timeout)
+			s.mux.HandleFunc("GET /timeout", func(w http.ResponseWriter, r *http.Request) {
+				dl, ok := r.Context().Deadline()
+				if !ok {
+					http.Error(w, "no deadline in the request context", http.StatusInternalServerError)
+					return
+				}
+				until := time.Until(dl)
+				if until <= 0 || until > tt.wantWithin {
+					http.Error(w, fmt.Sprintf("deadline in %v, want within %v", until, tt.wantWithin), http.StatusInternalServerError)
+					return
+				}
+				if until <= tt.wantAbove {
+					http.Error(w, fmt.Sprintf("deadline in %v, want above %v", until, tt.wantAbove), http.StatusInternalServerError)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+			ts := httptest.NewServer(s)
+			defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/timeout")
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d, want 200: %s", resp.StatusCode, raw)
+			resp, err := http.Get(ts.URL + "/timeout")
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status %d, want 200: %s", resp.StatusCode, raw)
+			}
+		})
 	}
 }
 
@@ -361,7 +379,7 @@ func (failingService) Delete(context.Context, string, string, *int64) error {
 func TestServiceErrorLog(t *testing.T) {
 	buf := &syncBuffer{}
 	log := slog.New(slog.NewJSONHandler(buf, nil))
-	ts := httptest.NewServer(NewServer(failingService{}, log))
+	ts := httptest.NewServer(NewServer(failingService{}, log, 0))
 
 	resp, err := http.Get(ts.URL + "/db/users/1")
 	if err != nil {
