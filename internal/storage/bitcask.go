@@ -27,8 +27,9 @@ type Bitcask struct {
 	opts Options
 	log  *slog.Logger
 
-	wmu    sync.Mutex // serialises writers
-	lastTS int64      // newest record timestamp; guarded by wmu (set by Open before any Put)
+	mergeMu sync.Mutex // one Merge at a time; Close waits for it. Taken before wmu.
+	wmu     sync.Mutex // serialises writers
+	lastTS  int64      // newest record timestamp; guarded by wmu (set by Open before any Put)
 
 	fmu    sync.RWMutex // guards the fields below
 	files  map[uint32]*datafile
@@ -71,6 +72,10 @@ func Open(opts Options) (*Bitcask, error) {
 		return nil, err
 	}
 
+	if err := removeMergeTemps(opts.Dir); err != nil {
+		lock.Close()
+		return nil, err
+	}
 	ids, err := listDatafileIDs(opts.Dir)
 	if err != nil {
 		lock.Close()
@@ -176,6 +181,11 @@ func listDatafileIDs(dir string) ([]uint32, error) {
 
 // Get returns the value stored under key, or ErrNotFound.
 func (b *Bitcask) Get(key []byte) ([]byte, error) {
+	// Hold fmu across the lookup and the read so Close can't close the file
+	// under us, and Merge can't drop the file the entry points at.
+	b.fmu.RLock()
+	defer b.fmu.RUnlock()
+
 	e, ok := b.keydir.get(string(key))
 	if !ok {
 		return nil, ErrNotFound
@@ -183,10 +193,6 @@ func (b *Bitcask) Get(key []byte) ([]byte, error) {
 	if e.valueSize == TombstoneValueSize {
 		return nil, ErrNotFound
 	}
-
-	// Hold fmu across the read so Close can't close the file under us.
-	b.fmu.RLock()
-	defer b.fmu.RUnlock()
 	df := b.files[e.fileID]
 
 	if b.closed {
@@ -370,8 +376,11 @@ func (b *Bitcask) Scan(prefix []byte, fn func(key, value []byte) bool) error {
 }
 
 // Close stops the interval syncer, fsyncs the active file and closes every
-// open data file. It waits for an in-flight Put. It is safe to call twice.
+// open data file. It waits for an in-flight Put or Merge. It is safe to call twice.
+// ponytail: waits out a whole Merge; add cancellation if merges get long.
 func (b *Bitcask) Close() error {
+	b.mergeMu.Lock()
+	defer b.mergeMu.Unlock()
 	b.wmu.Lock()
 	defer b.wmu.Unlock()
 
