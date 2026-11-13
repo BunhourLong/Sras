@@ -37,7 +37,8 @@ phases or start implementation in the splitting task.
 
 ## Resume
 
-Use the recorded task, diff, failing command, and worker session ID if supported.
-Check the working tree before resuming. If a worker hit a usage limit, report it
-and retain the exact resume or fresh-dispatch command in `memory.md`; no blind
-retries or model substitutions. No arbitrary tool-call or line-count cutoff.
+Use the recorded task, brief, frozen diff, and failing command. Check the working
+tree before resuming. If a worker hit a usage limit, report it and record the
+brief path, role, provider/model, options, and isolation in `memory.md` so the
+next attempt is a fresh `delegate_task`; no blind retries or model substitutions.
+No arbitrary tool-call or line-count cutoff.
