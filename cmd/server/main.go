@@ -38,7 +38,7 @@ func main() {
 		log.Error("open storage", "err", err)
 		os.Exit(1)
 	}
-	defer engine.Close()
+	defer func() { _ = engine.Close() }()
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

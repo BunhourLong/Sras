@@ -79,16 +79,16 @@ func open(opts Options, syncDir func(string) error) (*Bitcask, error) {
 	}
 
 	if err := removeMergeTemps(opts.Dir); err != nil {
-		lock.Close()
+		_ = lock.Close()
 		return nil, err
 	}
 	ids, err := listDatafileIDs(opts.Dir)
 	if err != nil {
-		lock.Close()
+		_ = lock.Close()
 		return nil, err
 	}
 	if err := removeOrphanHints(opts.Dir, ids); err != nil {
-		lock.Close()
+		_ = lock.Close()
 		return nil, err
 	}
 
@@ -105,7 +105,7 @@ func open(opts Options, syncDir func(string) error) (*Bitcask, error) {
 		// Only the newest file is written to; the rest are immutable.
 		df, err := openDatafile(opts.Dir, id, i < len(ids)-1)
 		if err != nil {
-			b.Close()
+			_ = b.Close()
 			return nil, fmt.Errorf("storage: %w", err)
 		}
 		b.files[id] = df
@@ -118,12 +118,12 @@ func open(opts Options, syncDir func(string) error) (*Bitcask, error) {
 	}
 
 	if err := b.rebuildKeydir(ids); err != nil {
-		b.Close()
+		_ = b.Close()
 		return nil, fmt.Errorf("storage: recovery: %w", err)
 	}
 	// Recovery may adopt a file left before its directory entry was synced.
 	if err := b.syncDir(opts.Dir); err != nil {
-		b.Close()
+		_ = b.Close()
 		return nil, fmt.Errorf("storage: sync data dir after recovery: %w", err)
 	}
 
@@ -144,7 +144,7 @@ func lockDir(dir string) (*os.File, error) {
 		return nil, fmt.Errorf("storage: open lock file: %w", err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
+		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, fmt.Errorf("storage: %s: %w", dir, ErrLocked)
 		}
@@ -345,7 +345,7 @@ func (b *Bitcask) rotate(old *datafile) (*datafile, error) {
 	}
 	df, err := b.createSyncedDatafile()
 	if err != nil {
-		ro.close()
+		_ = ro.close()
 		return nil, err
 	}
 
