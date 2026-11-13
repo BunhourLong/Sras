@@ -28,3 +28,6 @@ GOAL.md
 
 # Local agent instructions
 AGENTS.md
+
+# Local worker briefs, diffs, and execution logs
+.delegate/
