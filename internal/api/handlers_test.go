@@ -37,6 +37,14 @@ func TestDocumentCRUD(t *testing.T) {
 		{"null body", "PUT", "/db/users/2", `null`, 400, 0},
 		{"bad collection", "PUT", "/db/Users/1", `{}`, 400, 0},
 		{"get after replace", "GET", "/db/users/1", "", 200, 2},
+		{"delete stale rev", "DELETE", "/db/users/1?rev=1", "", 409, 0},
+		{"delete bad rev", "DELETE", "/db/users/1?rev=x", "", 400, 0},
+		{"delete", "DELETE", "/db/users/1?rev=2", "", 204, 0},
+		{"get deleted", "GET", "/db/users/1", "", 404, 0},
+		{"delete again", "DELETE", "/db/users/1", "", 404, 0},
+		{"delete bad collection", "DELETE", "/db/Users/1", "", 400, 0},
+		{"recreate after delete", "PUT", "/db/users/1", `{"name":"d"}`, 201, 1},
+		{"delete without rev", "DELETE", "/db/users/1", "", 204, 0},
 	}
 	for _, s := range steps {
 		req, _ := http.NewRequest(s.method, ts.URL+s.path, strings.NewReader(s.body))
@@ -56,6 +64,40 @@ func TestDocumentCRUD(t *testing.T) {
 				t.Fatalf("%s: body %v, want _id 1 and _rev %v", s.name, body, s.rev)
 			}
 		}
+	}
+}
+
+func TestDeleteIfMatch(t *testing.T) {
+	engine, err := storage.Open(storage.Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	ts := httptest.NewServer(NewServer(service.NewDocuments(engine, nil), nil))
+	defer ts.Close()
+
+	do := func(method, ifMatch, body string) int {
+		t.Helper()
+		req, _ := http.NewRequest(method, ts.URL+"/db/users/1", strings.NewReader(body))
+		if ifMatch != "" {
+			req.Header.Set("If-Match", ifMatch)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if got := do("PUT", "", `{}`); got != 201 {
+		t.Fatalf("create: status %d, want 201", got)
+	}
+	if got := do("DELETE", `"2"`, ""); got != 409 {
+		t.Fatalf("stale If-Match: status %d, want 409", got)
+	}
+	if got := do("DELETE", `"1"`, ""); got != 204 {
+		t.Fatalf("If-Match: status %d, want 204", got)
 	}
 }
 

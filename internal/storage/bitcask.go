@@ -24,16 +24,18 @@ var _ Engine = (*Bitcask)(nil)
 // Bitcask is an append-only log store with an in-memory hash index. There is a
 // single writer (wmu); readers run concurrently against the immutable files.
 type Bitcask struct {
-	opts Options
-	log  *slog.Logger
+	opts    Options
+	log     *slog.Logger
+	syncDir func(string) error
 
-	wmu    sync.Mutex // serialises writers
-	lastTS int64      // newest record timestamp; guarded by wmu (set by Open before any Put)
+	mergeMu sync.Mutex // one Merge at a time; Close waits for it. Taken before wmu.
+	wmu     sync.Mutex // serialises writers
+	lastTS  int64      // newest record timestamp; guarded by wmu (set by Open before any Put)
+	nextID  uint32     // next file ID to reserve; guarded by wmu
 
 	fmu    sync.RWMutex // guards the fields below
 	files  map[uint32]*datafile
 	active *datafile
-	nextID uint32
 	closed bool
 
 	keydir *keydir
@@ -46,6 +48,11 @@ type Bitcask struct {
 
 // Open loads the data dir and rebuilds the keydir.
 func Open(opts Options) (*Bitcask, error) {
+	return open(opts, syncDir)
+}
+
+// open loads the data dir using the supplied directory sync function.
+func open(opts Options, syncDir func(string) error) (*Bitcask, error) {
 	if opts.Dir == "" {
 		return nil, fmt.Errorf("storage: Options.Dir is required")
 	}
@@ -71,19 +78,28 @@ func Open(opts Options) (*Bitcask, error) {
 		return nil, err
 	}
 
+	if err := removeMergeTemps(opts.Dir); err != nil {
+		lock.Close()
+		return nil, err
+	}
 	ids, err := listDatafileIDs(opts.Dir)
 	if err != nil {
 		lock.Close()
 		return nil, err
 	}
+	if err := removeOrphanHints(opts.Dir, ids); err != nil {
+		lock.Close()
+		return nil, err
+	}
 
 	b := &Bitcask{
-		opts:   opts,
-		log:    opts.Logger,
-		files:  make(map[uint32]*datafile, len(ids)),
-		nextID: 1,
-		keydir: newKeydir(),
-		lock:   lock,
+		opts:    opts,
+		log:     opts.Logger,
+		syncDir: syncDir,
+		files:   make(map[uint32]*datafile, len(ids)),
+		nextID:  1,
+		keydir:  newKeydir(),
+		lock:    lock,
 	}
 	for i, id := range ids {
 		// Only the newest file is written to; the rest are immutable.
@@ -104,6 +120,11 @@ func Open(opts Options) (*Bitcask, error) {
 	if err := b.rebuildKeydir(ids); err != nil {
 		b.Close()
 		return nil, fmt.Errorf("storage: recovery: %w", err)
+	}
+	// Recovery may adopt a file left before its directory entry was synced.
+	if err := b.syncDir(opts.Dir); err != nil {
+		b.Close()
+		return nil, fmt.Errorf("storage: sync data dir after recovery: %w", err)
 	}
 
 	if opts.Fsync == FsyncInterval {
@@ -176,6 +197,11 @@ func listDatafileIDs(dir string) ([]uint32, error) {
 
 // Get returns the value stored under key, or ErrNotFound.
 func (b *Bitcask) Get(key []byte) ([]byte, error) {
+	// Hold fmu across the lookup and the read so Close can't close the file
+	// under us, and Merge can't drop the file the entry points at.
+	b.fmu.RLock()
+	defer b.fmu.RUnlock()
+
 	e, ok := b.keydir.get(string(key))
 	if !ok {
 		return nil, ErrNotFound
@@ -183,10 +209,6 @@ func (b *Bitcask) Get(key []byte) ([]byte, error) {
 	if e.valueSize == TombstoneValueSize {
 		return nil, ErrNotFound
 	}
-
-	// Hold fmu across the read so Close can't close the file under us.
-	b.fmu.RLock()
-	defer b.fmu.RUnlock()
 	df := b.files[e.fileID]
 
 	if b.closed {
@@ -247,14 +269,13 @@ func (b *Bitcask) appendRecord(key, value []byte, tombstone bool) (entry, error)
 		return entry{}, ErrClosed
 	}
 	if active == nil {
-		df, err := createDatafile(b.opts.Dir, b.nextID)
+		df, err := b.createSyncedDatafile()
 		if err != nil {
 			return entry{}, err
 		}
 		b.fmu.Lock()
 		b.files[df.id] = df
 		b.active = df
-		b.nextID++
 		b.fmu.Unlock()
 		active = df
 	}
@@ -290,6 +311,27 @@ func (b *Bitcask) appendRecord(key, value []byte, tombstone bool) (entry, error)
 	}, nil
 }
 
+// createSyncedDatafile creates a file and makes its name durable before the
+// caller publishes it or appends records. The caller holds wmu.
+func (b *Bitcask) createSyncedDatafile() (*datafile, error) {
+	df, err := createDatafile(b.opts.Dir, b.nextID)
+	if err != nil {
+		return nil, err
+	}
+	// Consume the ID even on sync failure: cleanup may leave the file behind.
+	b.nextID++
+	if err := b.syncDir(b.opts.Dir); err != nil {
+		if closeErr := df.close(); closeErr != nil {
+			b.log.Warn("storage: close unsynced data file", "path", df.path, "err", closeErr)
+		}
+		if removeErr := os.Remove(df.path); removeErr != nil {
+			b.log.Warn("storage: remove unsynced data file", "path", df.path, "err", removeErr)
+		}
+		return nil, fmt.Errorf("sync new data file directory: %w", err)
+	}
+	return df, nil
+}
+
 // rotate makes old immutable and starts a new active file. The caller holds
 // wmu. old is synced first so an immutable file is always fully durable, then
 // reopened read-only; readers still using the old handle finish before the swap.
@@ -301,7 +343,7 @@ func (b *Bitcask) rotate(old *datafile) (*datafile, error) {
 	if err != nil {
 		return nil, err
 	}
-	df, err := createDatafile(b.opts.Dir, b.nextID)
+	df, err := b.createSyncedDatafile()
 	if err != nil {
 		ro.close()
 		return nil, err
@@ -311,7 +353,6 @@ func (b *Bitcask) rotate(old *datafile) (*datafile, error) {
 	b.files[old.id] = ro
 	b.files[df.id] = df
 	b.active = df
-	b.nextID++
 	b.fmu.Unlock()
 
 	if err := old.close(); err != nil {
@@ -337,17 +378,44 @@ func (b *Bitcask) Delete(key []byte) error {
 	return nil
 }
 
-// Scan walks every keydir key with the given prefix. The hash index is
-// unordered, so this is O(n) over all live keys.
+// Scan calls fn for every key with the given prefix, in sorted key order, until
+// fn returns false. The hash index is unordered, so this is O(n) over all live
+// keys plus O(k log k) to sort the k matches.
 //
-// TODO(build order 7): implement the scan.
+// Keys are snapshotted first and no lock is held while fn runs, so fn may
+// write. Each value is read at call time: a key deleted after the snapshot is
+// skipped, and one overwritten after it yields the newer value.
 func (b *Bitcask) Scan(prefix []byte, fn func(key, value []byte) bool) error {
-	return ErrNotImplemented
+	b.fmu.RLock()
+	closed := b.closed
+	b.fmu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+
+	keys := b.keydir.keys(string(prefix))
+	sort.Strings(keys)
+	for _, k := range keys {
+		v, err := b.Get([]byte(k))
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("storage: scan %q: %w", prefix, err)
+		}
+		if !fn([]byte(k), v) {
+			return nil
+		}
+	}
+	return nil
 }
 
 // Close stops the interval syncer, fsyncs the active file and closes every
-// open data file. It waits for an in-flight Put. It is safe to call twice.
+// open data file. It waits for an in-flight Put or Merge. It is safe to call twice.
+// ponytail: waits out a whole Merge; add cancellation if merges get long.
 func (b *Bitcask) Close() error {
+	b.mergeMu.Lock()
+	defer b.mergeMu.Unlock()
 	b.wmu.Lock()
 	defer b.wmu.Unlock()
 

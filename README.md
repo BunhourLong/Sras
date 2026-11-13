@@ -6,7 +6,7 @@ Clients store JSON documents in named collections through a small REST API. Unde
 
 This is a learning project: **correctness and clarity come before performance**. It uses only the Go standard library.
 
-> **Status:** work in progress. Documents can be created, replaced and read over HTTP, and survive a restart (the keydir is rebuilt on startup). Data files rotate at `MaxFileSize`. The engine supports delete (tombstones); the `DELETE` endpoint, scan, query and compaction are still pending. See [Roadmap](#roadmap).
+> **Status:** work in progress. Documents can be created, replaced, read and deleted over HTTP, and survive a restart (the keydir is rebuilt on startup). Data files rotate at `MaxFileSize`. The engine can prefix-scan and compact (`Merge`); query and the `/admin/merge` endpoint are still pending. See [Roadmap](#roadmap).
 
 ---
 
@@ -69,9 +69,11 @@ Stop the server with `Ctrl+C`. It shuts down gracefully: in-flight requests get 
 | `GET` | `/healthz` | Liveness check, returns `{"status":"ok"}` | ✅ implemented |
 | `GET` | `/db/{collection}/{id}` | Read a document | ✅ implemented |
 | `PUT` | `/db/{collection}/{id}` | Create (201) or replace (200) a document | ✅ implemented |
-| `DELETE` | `/db/{collection}/{id}` | Delete a document (204) | ⏳ planned |
+| `DELETE` | `/db/{collection}/{id}` | Delete a document (204) | ✅ implemented |
 | `POST` | `/db/{collection}/_find` | Query with a filter | ⏳ planned |
 | `POST` | `/admin/merge` | Trigger compaction | ⏳ planned |
+| `GET` | `/docs` | Swagger UI (loads assets from the jsdelivr CDN) | ✅ implemented |
+| `GET` | `/openapi.yaml` | OpenAPI 3 spec (`internal/api/openapi.yaml`, embedded) | ✅ implemented |
 
 ### `PUT /db/{collection}/{id}`
 - Body must be a JSON **object**, at most **1 MB**. Arrays, `null`, and invalid JSON return `400`.
@@ -82,6 +84,11 @@ Stop the server with `Ctrl+C`. It shuts down gracefully: in-flight requests get 
 
 ### `GET /db/{collection}/{id}`
 Returns `200` with the document, or `404` if it doesn't exist.
+
+### `DELETE /db/{collection}/{id}`
+- Returns `204 No Content`, or `404` if the document doesn't exist.
+- **Optional precondition:** `?rev=N` or `If-Match: "N"` (the query parameter wins). If it doesn't match the stored `_rev`, you get `409`. A non-integer rev returns `400`. Without either, the delete is unconditional.
+- After a delete, a `PUT` without `_rev` creates the document again at `_rev` 1.
 
 ### `POST /db/{collection}/_find` (planned)
 ```json
@@ -200,8 +207,8 @@ Every live key has exactly one entry pointing at its latest value. The whole key
 | **Put** | Encode record, append to the active file, update the keydir. Keydir stores `recordStart + 20 + len(key)` as the value offset. | One sequential write |
 | **Get** | Keydir lookup, then **one `ReadAt`** that covers the whole record (header + key + value). CRC and key are verified before returning. | One random read |
 | **Delete** | Append a tombstone, remove the key from the keydir. A missing key returns `ErrNotFound` and writes nothing. Shares `Put`'s write path (`appendRecord`), so rotation and fsync apply. | One sequential write |
-| **Scan(prefix)** *(planned)* | Walk every keydir key and match the prefix | **O(n)** over all keys, because a hash index is unordered |
-| **Merge** *(planned)* | Rewrite immutable files, keeping only live records | Background I/O |
+| **Scan(prefix)** | Snapshot matching keydir keys, sort them, then `Get` each and call `fn` until it returns false. No lock is held during `fn`; a key deleted after the snapshot is skipped. | **O(n)** over all keys + **O(k log k)** sort, because a hash index is unordered |
+| **Merge** | Copy live records from every immutable file into new files, swap the keydir, delete the old files. Runs alongside reads and writes. | Background I/O, O(immutable data) |
 
 ### Concurrency
 - **Single writer:** `Put` holds a write mutex (`wmu`). Many readers run concurrently without it; `Get` holds `fmu` (read lock) across its `ReadAt`, so `Close` waits for in-flight reads.
@@ -221,15 +228,16 @@ Every live key has exactly one entry pointing at its latest value. The whole key
 
 ### Recovery on `Open`
 1. List data files in ID order.
-2. Replay every record sequentially (64 KB buffered reader) to rebuild the keydir: latest timestamp wins (ties go to the later record), a tombstone removes the key.
-3. If the active file has an invalid record (torn write, garbage, bad CRC), truncate it there and log a warning with the number of bytes dropped. An invalid record in an **immutable** file makes `Open` fail with `ErrCorrupt`.
+2. For immutable merge outputs, use a validated `.hint` file (keys and entry metadata, no values) to rebuild the keydir. Missing hints fall back silently to scanning; invalid or unreadable hints warn and fall back to scanning the whole data file. Other files, including the active file, are scanned sequentially (64 KB buffered reader). Latest timestamp wins (ties go to the later record); a tombstone removes the key.
+3. If the active file has an invalid record (torn write, garbage, bad CRC), truncate it there and log a warning with the number of bytes dropped. An invalid record in a scanned **immutable** file makes `Open` fail with `ErrCorrupt`. A valid hint skips the immutable data scan, so value corruption surfaces at `Get` (CRC) instead of at `Open`.
 4. Never panic on a bad CRC; sizes are checked against the file before allocating.
 
-### Compaction (`Merge`) *(planned, step 6)*
-1. Snapshot the list of immutable files.
-2. Copy only live entries (those the keydir still points at) into new merged files.
-3. Atomically swap the keydir entries, then delete the old files.
-4. The active file is never touched; reads and writes keep working during a merge.
+### Compaction (`Merge`)
+1. Snapshot the list of immutable files (every file except the active one). One merge runs at a time; `Close` waits for it.
+2. Copy only live entries (those the keydir still points at) into new `NNNNNN.data.tmp` files, capped at `MaxFileSize`, keeping their timestamps. Tombstones are dropped: the snapshot holds every immutable file, so no older copy of the key survives. Write and fsync a matching `.hint.tmp` for each output: `SRHT` magic, version 1, data-file size, timestamp/key-size/value-size/value-offset/key entries, and a whole-file CRC32 trailer (little endian).
+3. Under the write lock: rotate the active file so later writes get IDs above the outputs, re-tombstone any copied key that was deleted mid-merge, fsync, rename each `.data.tmp` then its `.hint.tmp`, fsync the dir, then swap the keydir entries (a Put or Delete during the merge wins) and drop the old files.
+4. Delete the old files in ascending ID order, each hint before its data file. A crash at any step replays correctly; `Open` removes leftover `*.data.tmp`, `*.hint.tmp`, and orphan numbered `.hint` files. Failed merges clean up both kinds of temporary files.
+5. The active file is never touched; reads and writes keep working during a merge.
 
 ---
 
@@ -253,12 +261,12 @@ Logs are structured (`log/slog`, text format) on stdout.
 cmd/server/main.go          # flags, wiring, graceful shutdown
 internal/api/
     router.go               # Server, DocumentService interface, routes
-    handlers.go             # GET/PUT document, healthz
+    handlers.go             # GET/PUT/DELETE document, healthz
     errors.go               # error envelope, service error -> status mapping
     middleware.go           # (empty, reserved)
     handlers_test.go        # end-to-end CRUD via httptest + real engine
 internal/service/
-    documents.go            # Get, Put, _rev handling, ID validation
+    documents.go            # Get, Put, Delete, _rev handling, ID validation
     collections.go          # collection name validation
 internal/query/
     parser.go               # filter / FindRequest types
@@ -269,9 +277,10 @@ internal/storage/
     datafile.go             # one data file: open/create, readAt, append, sync
     record.go               # record encode/decode + CRC
     keydir.go               # in-memory index
-    compaction.go           # Merge (planned)
+    compaction.go           # Merge
+    hint.go                 # merge hint files: keys, offsets, whole-file CRC
     recovery.go             # keydir rebuild on Open
-    *_test.go               # record, datafile, bitcask tests
+    *_test.go               # record, datafile, bitcask, recovery, compaction, hint tests
 internal/config/config.go   # defaults
 data/                       # runtime data (gitignored)
 ```
@@ -289,8 +298,10 @@ go test -race ./...
 Current coverage:
 - **`record_test.go`:** encode/decode round-trips (normal value, empty value, tombstone), plus a flipped byte in each case must return `ErrCorrupt`.
 - **`datafile_test.go`:** creating an existing file fails; append two records, sync, and read each value back at `recordStart + 20 + len(key)`.
-- **`bitcask_test.go`:** Put/Get/overwrite under all three fsync policies, `ErrClosed` after `Close`, reopening appends to the existing file, and a concurrent Put/Get test (8 goroutines × 100 keys) run with `-race`.
-- **`handlers_test.go`:** full HTTP flow through `httptest` against a real engine in `t.TempDir()`: healthz, 404, create 201, replace 200, stale `_rev` 409, bad `_rev` / non-object / `null` body / bad collection 400.
+- **`bitcask_test.go`:** Put/Get/overwrite under all three fsync policies, `ErrClosed` after `Close`, reopening appends to the existing file, and a concurrent Put/Get test (8 goroutines × 100 keys) run with `-race`. Scan: prefixes (`users/` vs `user` vs `""`), sorted order, early stop, deleted keys skipped, after reopen, `ErrClosed`, a callback that writes, and a concurrent writer with rotation under `-race`.
+- **`compaction_test.go`:** Merge shrinks disk usage and keeps latest values and deletes, a second merge over merged files, reopen, `ErrClosed`; a crash before/while deleting old files (every suffix left behind) plus a leftover `.tmp`; Put and Delete between copy and swap (regression: resurrected key); concurrent Put/Get/Delete during repeated merges under `-race`.
+- **`hint_test.go`:** hint round-trips and validation, identical keydir/timestamps with hints or scans, deferred value CRC detection, invalid/unreadable hint fallback and warnings, active hints ignored, second-merge cleanup, failed-merge cleanup, and temporary/orphan hint removal.
+- **`handlers_test.go`:** full HTTP flow through `httptest` against a real engine in `t.TempDir()`: healthz, 404, create 201, replace 200, stale `_rev` 409, bad `_rev` / non-object / `null` body / bad collection 400, delete 204 (via `?rev=` and `If-Match`), delete stale rev 409, delete missing 404, re-create after delete.
 
 Conventions: data directories always come from `t.TempDir()`, and every bug fix gets a regression test.
 
@@ -300,22 +311,22 @@ Conventions: data directories always come from `t.TempDir()`, and every bug fix 
 
 | # | Step | Status |
 |---|---|---|
-| 1 | Service layer + HTTP CRUD | 🟡 `GET`, `PUT`, `/healthz` done; `DELETE` pending |
+| 1 | Service layer + HTTP CRUD | ✅ `GET`, `PUT`, `DELETE`, `/healthz` done |
 | 2 | `record.go` + `datafile.go` (encode/decode, CRC, append) | ✅ done |
 | 3 | Bitcask `Put` / `Get` / `Delete` on a single file | ✅ done |
 | 4 | File rotation + keydir rebuild on startup | ✅ done |
 | 5 | Tombstones + truncated-tail recovery | ✅ done |
-| 6 | Compaction (`Merge`) + `/admin/merge` | ⏳ |
+| 6 | Compaction (`Merge`) + `/admin/merge` | 🟡 `Merge` done, endpoint pending |
 | 7 | Query engine + `_find` endpoint | ⏳ types only |
-| 8 | Optional: hint files, secondary indexes, TTL, auth | ⏳ |
+| 8 | Hint files; optional secondary indexes, TTL, auth | 🟡 merge hints done; others pending |
 
 ---
 
 ## Known limitations
 
-- **Startup time grows with data size:** recovery replays every record (hint files are planned).
+- **Startup time grows with keys and unmerged data:** valid merge hints skip values; other files still require a full replay.
 - **Data dir lock uses `flock`:** Unix only (macOS/Linux); no Windows build yet.
-- **No `DELETE` endpoint, scan, query, or compaction yet.**
+- **No query (`_find`) yet, and no automatic compaction:** `Merge` must be called explicitly (no dead-bytes trigger, no HTTP endpoint yet).
 - **Keys must fit in RAM:** a Bitcask trait by design. Every live key is held in the keydir.
 - **Scans are O(n):** the keydir is a hash map, so prefix scans (and `_find`) walk every key.
 - **One global write lock in the service layer:** simple and correct, but writes to different documents serialize.

@@ -1,6 +1,9 @@
 package storage
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // entry records where a key's most recent value lives on disk.
 type entry struct {
@@ -38,6 +41,20 @@ func (k *keydir) delete(key string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	delete(k.entries, key)
+}
+
+// keys returns a snapshot of every key with the given prefix, unordered.
+// ponytail: O(n) over all keys; an ordered index (roadmap 4.2) makes it O(log n + k).
+func (k *keydir) keys(prefix string) []string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	var out []string
+	for key := range k.entries {
+		if strings.HasPrefix(key, prefix) {
+			out = append(out, key)
+		}
+	}
+	return out
 }
 
 func (k *keydir) len() int {
