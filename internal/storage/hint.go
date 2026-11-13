@@ -43,11 +43,11 @@ func writeHint(dir string, id uint32, dataSize int64, entries []hintEntry) error
 		return fmt.Errorf("create hint: %w", err)
 	}
 	if _, err := f.Write(buf); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("write hint: %w", err)
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("sync hint: %w", err)
 	}
 	if err := f.Close(); err != nil {

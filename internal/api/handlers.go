@@ -107,7 +107,7 @@ var openAPISpec []byte
 // handleOpenAPI serves GET /openapi.yaml.
 func handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/yaml")
-	w.Write(openAPISpec)
+	_, _ = w.Write(openAPISpec)
 }
 
 // docsPage renders Swagger UI against /openapi.yaml.
@@ -123,5 +123,5 @@ const docsPage = `<!doctype html>
 // handleDocs serves GET /docs.
 func handleDocs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(docsPage))
+	_, _ = w.Write([]byte(docsPage))
 }

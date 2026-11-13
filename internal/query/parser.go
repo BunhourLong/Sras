@@ -69,7 +69,7 @@ func Parse(raw json.RawMessage) (Filter, error) {
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return Filter{}, fmt.Errorf("invalid filter JSON (%v): %w", err, ErrInvalidFilter)
+		return Filter{}, fmt.Errorf("invalid filter JSON (%w): %w", err, ErrInvalidFilter)
 	}
 	if err := dec.Decode(&v); err != io.EOF {
 		return Filter{}, fmt.Errorf("unexpected data after the filter: %w", ErrInvalidFilter)

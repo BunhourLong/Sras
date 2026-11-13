@@ -43,7 +43,7 @@ func openDatafile(dir string, id uint32, readOnly bool) (*datafile, error) {
 	}
 	info, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("stat data file %s: %w", path, err)
 	}
 	return &datafile{id: id, path: path, f: f, readOnly: readOnly, size: info.Size()}, nil

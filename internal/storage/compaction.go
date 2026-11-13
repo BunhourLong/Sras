@@ -62,7 +62,7 @@ func (b *Bitcask) Merge() error {
 		for _, o := range outs {
 			hint := hintPath(b.opts.Dir, o.id)
 			for _, p := range []string{o.path, datafilePath(b.opts.Dir, o.id), hint + tmpExt, hint} {
-				os.Remove(p) // missing ones are fine
+				_ = os.Remove(p) // missing ones are fine
 			}
 		}
 		return fmt.Errorf("storage: merge: %w", err)
@@ -138,7 +138,7 @@ func (b *Bitcask) copyLive(olds []*datafile) (outs []*datafile, moves []moved, e
 
 func closeAll(dfs []*datafile) {
 	for _, df := range dfs {
-		df.close()
+		_ = df.close()
 	}
 }
 
@@ -242,7 +242,7 @@ func syncDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("open dir: %w", err)
 	}
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	if err := d.Sync(); err != nil {
 		return fmt.Errorf("sync dir %s: %w", dir, err)
 	}

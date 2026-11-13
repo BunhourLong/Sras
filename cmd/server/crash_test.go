@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -195,7 +196,8 @@ func stopChild(c *childProc) {
 func killChild(t *testing.T, c *childProc) {
 	t.Helper()
 	stopChild(c)
-	ee, isExit := c.waitErr.(*exec.ExitError)
+	var ee *exec.ExitError
+	isExit := errors.As(c.waitErr, &ee)
 	ws, sysOK := syscall.WaitStatus(0), false
 	if isExit {
 		ws, sysOK = ee.Sys().(syscall.WaitStatus)

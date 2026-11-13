@@ -92,7 +92,7 @@ func TestCreateDocument(t *testing.T) {
 	}
 
 	// a. create: the server generates the id, a body _id is ignored.
-	resp, doc := do("POST", "/db/users", `{"name":"a","_id":"mine"}`)
+	resp, doc := do("POST", "/db/users", `{"name":"a","_id":"mine"}`) //nolint:bodyclose // resp.Body is closed inside do
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create: status %d, want 201 (body %v)", resp.StatusCode, doc)
 	}
@@ -118,7 +118,7 @@ func TestCreateDocument(t *testing.T) {
 	}
 
 	// b. the Location path reads the document back.
-	resp, got := do("GET", resp.Header.Get("Location"), "")
+	resp, got := do("GET", resp.Header.Get("Location"), "") //nolint:bodyclose // resp.Body is closed inside do
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("read back: status %d, want 200 (body %v)", resp.StatusCode, got)
 	}
@@ -129,7 +129,7 @@ func TestCreateDocument(t *testing.T) {
 	// c. further creates get distinct, strictly ascending UUIDv7 ids.
 	ids := []string{id}
 	for i := 0; i < 3; i++ {
-		resp, d := do("POST", "/db/users", `{"name":"b"}`)
+		resp, d := do("POST", "/db/users", `{"name":"b"}`) //nolint:bodyclose // resp.Body is closed inside do
 		if resp.StatusCode != http.StatusCreated {
 			t.Fatalf("create %d: status %d, want 201 (body %v)", i, resp.StatusCode, d)
 		}
@@ -158,14 +158,14 @@ func TestCreateDocument(t *testing.T) {
 		{"rev 0 creates", "/db/users", `{"_rev":0}`, 201},
 	}
 	for _, s := range steps {
-		resp, _ := do("POST", s.path, s.body)
+		resp, _ := do("POST", s.path, s.body) //nolint:bodyclose // resp.Body is closed inside do
 		if resp.StatusCode != s.status {
 			t.Fatalf("%s: status %d, want %d", s.name, resp.StatusCode, s.status)
 		}
 	}
 
 	// e. the generated id works with the existing endpoints.
-	resp, got = do("PUT", "/db/users/"+ids[0], `{"_rev":1}`)
+	resp, got = do("PUT", "/db/users/"+ids[0], `{"_rev":1}`) //nolint:bodyclose // resp.Body is closed inside do
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("put: status %d, want 200 (body %v)", resp.StatusCode, got)
 	}
